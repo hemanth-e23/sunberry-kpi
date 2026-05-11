@@ -1,10 +1,9 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// Dev serves at /, GitHub Pages serves at /sunberry-kpi/.
-// When you switch to a custom domain, change `build` base back to '/'.
-export default defineConfig(({ command }) => ({
+// Custom domain serves from root, so base = '/' for both dev and prod.
+export default defineConfig({
   plugins: [react()],
-  base: command === 'build' ? '/sunberry-kpi/' : '/',
+  base: '/',
   server: { port: 5173 },
-}));
+});
