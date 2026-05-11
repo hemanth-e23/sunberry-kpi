@@ -1,0 +1,841 @@
+import { useState, useEffect, useCallback, useRef } from "react";
+import { supabase } from "./lib/supabase";
+import CommentsModal, { CommentsList } from "./Comments.jsx";
+
+const DEFAULT_FILLER_TARGET = "07:00";
+
+const trimTime = (t) => (t ? t.slice(0, 5) : null);
+
+function rowToEntry(r) {
+  return {
+    date: r.entry_date,
+    product: r.product,
+    line1_produced: r.line1_produced,
+    line1_target: r.line1_target,
+    line1_capacity: r.line1_capacity,
+    line1_filler_start: trimTime(r.line1_filler_start),
+    line1_filler_target: trimTime(r.line1_filler_target),
+    line2_produced: r.line2_produced,
+    line2_target: r.line2_target,
+    line2_capacity: r.line2_capacity,
+    line2_filler_start: trimTime(r.line2_filler_start),
+    line2_filler_target: trimTime(r.line2_filler_target),
+    notes: r.notes,
+  };
+}
+
+function entryToRow(e) {
+  return {
+    entry_date: e.date,
+    product: e.product,
+    line1_produced: e.line1_produced,
+    line1_target: e.line1_target,
+    line1_capacity: e.line1_capacity,
+    line1_filler_start: e.line1_filler_start || null,
+    line1_filler_target: e.line1_filler_target || null,
+    line2_produced: e.line2_produced,
+    line2_target: e.line2_target,
+    line2_capacity: e.line2_capacity,
+    line2_filler_start: e.line2_filler_start || null,
+    line2_filler_target: e.line2_filler_target || null,
+    notes: e.notes || null,
+  };
+}
+
+function getWeekNumber(d) {
+  const date = new Date(d); date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + 3 - ((date.getDay() + 6) % 7));
+  const week1 = new Date(date.getFullYear(), 0, 4);
+  return Math.round(((date - week1) / 86400000 + week1.getDay() + 1) / 7);
+}
+function getMonday(d) {
+  const date = new Date(d); const day = date.getDay();
+  date.setDate(date.getDate() - day + (day === 0 ? -6 : 1)); date.setHours(0, 0, 0, 0); return date;
+}
+function formatDate(d) { return new Date(d + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }); }
+function formatDay(d) { return new Date(d + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }); }
+function formatDayShort(d) { return new Date(d + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }); }
+function fmt(n) { return n?.toLocaleString() ?? "—"; }
+function pc(a, b) { return b > 0 ? ((a / b) * 100).toFixed(1) : "—"; }
+function timeToMinutes(t) { if (!t) return null; const [h, m] = t.split(":").map(Number); return h * 60 + m; }
+function minutesDiff(actual, target) { const a = timeToMinutes(actual), t = timeToMinutes(target); if (a === null || t === null) return null; return a - t; }
+function formatMinDiff(diff) {
+  if (diff === null) return "—"; if (diff === 0) return "On time";
+  const abs = Math.abs(diff), h = Math.floor(abs / 60), m = abs % 60;
+  const ts = h > 0 ? `${h}h ${m}m` : `${m}m`;
+  return diff > 0 ? `+${ts} late` : `${ts} early`;
+}
+function formatTime12(t) { if (!t) return "—"; const [h, m] = t.split(":"); const hr = parseInt(h); return `${hr > 12 ? hr - 12 : hr || 12}:${m} ${hr >= 12 ? "PM" : "AM"}`; }
+function pctChange(c, p) { return (!p || p === 0) ? null : ((c - p) / p) * 100; }
+function eTotal(e) { return e ? (e.line1_produced || 0) + (e.line2_produced || 0) : 0; }
+function eTarget(e) { return e ? (e.line1_target || 0) + (e.line2_target || 0) : 0; }
+function eCap(e) { return e ? (e.line1_capacity || 0) + (e.line2_capacity || 0) : 0; }
+function eEff(e) { if (!e) return null; const t = eTarget(e); return t > 0 ? (eTotal(e) / t) * 100 : null; }
+function aggEff(arr) { if (!arr || arr.length === 0) return null; const p = arr.reduce((s, e) => s + eTotal(e), 0); const t = arr.reduce((s, e) => s + eTarget(e), 0); return t > 0 ? (p / t) * 100 : null; }
+function ppDelta(a, b) { return (a == null || b == null) ? null : a - b; }
+function uniqueProducts(arr) { return [...new Set((arr || []).map(e => e.product).filter(Boolean))]; }
+function perfColor(tgtHitPct) {
+  if (tgtHitPct == null) return "rgba(44,36,22,0.6)";
+  if (tgtHitPct >= 90) return "#0E9990";
+  if (tgtHitPct >= 75) return "#C4920F";
+  return "#D94A42";
+}
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// --- Theme colors ---
+const T = {
+  bg: "#F5F0E8", card: "rgba(255,255,255,0.6)", border: "rgba(0,0,0,0.06)", borderStrong: "rgba(0,0,0,0.1)",
+  text: "#2C2416", textMid: "rgba(44,36,22,0.6)", textLight: "rgba(44,36,22,0.4)", textFaint: "rgba(44,36,22,0.2)",
+  teal: "#0E9990", coral: "#D94A42", gold: "#C4920F", purple: "#7054AD",
+  tealBg: "rgba(14,153,144,0.1)", coralBg: "rgba(217,74,66,0.07)", goldBg: "rgba(196,146,15,0.1)",
+  gaugeBg: "rgba(0,0,0,0.06)", gaugeInnerBg: "rgba(0,0,0,0.03)",
+  barBg: "rgba(0,0,0,0.05)", barBgFaint: "rgba(0,0,0,0.02)",
+  modalBg: "#FAF6EF", modalOverlay: "rgba(44,36,22,0.35)",
+  inputBg: "rgba(0,0,0,0.03)", inputBorder: "rgba(0,0,0,0.1)",
+  footerBg: "#F5F0E8",
+  tickerBg: "linear-gradient(90deg, rgba(14,165,160,0.05), rgba(232,82,74,0.03), rgba(14,165,160,0.05))",
+};
+
+function ChangeIndicator({ value, suffix = "" }) {
+  if (value === null || value === undefined || isNaN(value)) return <span style={{ color: T.textFaint, fontSize: 11 }}>—</span>;
+  const color = value > 0 ? T.teal : value < 0 ? T.coral : T.textLight;
+  const arrow = value > 0 ? "▲" : value < 0 ? "▼" : "—";
+  return <span style={{ color, fontSize: 11, fontFamily: "var(--mono)", fontWeight: 600 }}>{arrow} {Math.abs(value).toFixed(1)}{suffix}</span>;
+}
+
+function SkuTag({ kind }) {
+  return (
+    <span title={kind === "different" ? "Comparing two days that ran different products — raw cases aren't directly comparable" : "This window mixes multiple products — raw cases aren't directly comparable"}
+      style={{ fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: T.gold, background: T.goldBg, padding: "2px 5px", borderRadius: 3, fontFamily: "var(--mono)", fontWeight: 600, whiteSpace: "nowrap" }}>
+      {kind === "different" ? "Diff SKU" : "Mixed SKUs"}
+    </span>
+  );
+}
+
+function DualGauge({ produced, target, capacity, label, colorA, size = 115 }) {
+  const tPct = target > 0 ? Math.min(produced / target, 1) : 0;
+  const cPct = capacity > 0 ? Math.min(produced / capacity, 1) : 0;
+  const r1 = (size - 16) / 2, r2 = r1 - 14, circ1 = Math.PI * r1, circ2 = Math.PI * r2, cy = size / 2 + 4;
+  const innerStroke = "rgba(44,36,22,0.55)";
+  return (
+    <div style={{ textAlign: "center" }}>
+      <svg width={size} height={size / 2 + 24} viewBox={`0 0 ${size} ${size / 2 + 24}`}>
+        <path d={`M 8,${cy} A ${r1},${r1} 0 0 1 ${size - 8},${cy}`} fill="none" stroke={T.gaugeBg} strokeWidth="8" strokeLinecap="round" />
+        <path d={`M 8,${cy} A ${r1},${r1} 0 0 1 ${size - 8},${cy}`} fill="none" stroke={colorA} strokeWidth="8" strokeLinecap="round"
+          strokeDasharray={circ1} strokeDashoffset={circ1 - tPct * circ1} style={{ transition: "stroke-dashoffset 1.2s ease" }} />
+        <path d={`M ${8 + 14},${cy} A ${r2},${r2} 0 0 1 ${size - 8 - 14},${cy}`} fill="none" stroke={T.gaugeInnerBg} strokeWidth="6" strokeLinecap="round" />
+        <path d={`M ${8 + 14},${cy} A ${r2},${r2} 0 0 1 ${size - 8 - 14},${cy}`} fill="none" stroke={innerStroke} strokeWidth="6" strokeLinecap="round"
+          strokeDasharray={circ2} strokeDashoffset={circ2 - cPct * circ2} style={{ transition: "stroke-dashoffset 1.2s ease" }} />
+        <text x={size / 2} y={cy - 6} textAnchor="middle" fill={T.text} fontSize="22" fontWeight="700" fontFamily="var(--mono)">{(tPct * 100).toFixed(1)}%</text>
+      </svg>
+      <div style={{ display: "flex", justifyContent: "center", gap: 12, fontFamily: "var(--mono)", marginTop: -2 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <span style={{ display: "inline-block", width: 10, height: 3, background: colorA, borderRadius: 2 }} />
+          <span style={{ fontSize: 11, color: T.text, fontWeight: 700 }}>{(tPct * 100).toFixed(1)}%</span>
+          <span style={{ fontSize: 9, color: T.textMid, letterSpacing: 1, textTransform: "uppercase" }}>tgt</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <span style={{ display: "inline-block", width: 10, height: 3, background: innerStroke, borderRadius: 2 }} />
+          <span style={{ fontSize: 11, color: T.text, fontWeight: 700 }}>{(cPct * 100).toFixed(1)}%</span>
+          <span style={{ fontSize: 9, color: T.textMid, letterSpacing: 1, textTransform: "uppercase" }}>cap</span>
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: T.text, marginTop: 6, letterSpacing: 1.5, textTransform: "uppercase", fontFamily: "var(--mono)", fontWeight: 700 }}>{label}</div>
+    </div>
+  );
+}
+
+function StatCard({ title, titleDetail, value, sub, accent, change, changeSuffix, tag }) {
+  return (
+    <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 10, padding: "14px 16px", flex: 1, minWidth: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5, gap: 6 }}>
+        <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)", minWidth: 0 }}>
+          {title}{titleDetail && <span style={{ color: T.text, marginLeft: 6, fontSize: 11, textTransform: "none", fontWeight: 600 }}>{titleDetail}</span>}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+          {tag}
+          {change !== undefined && <ChangeIndicator value={change} suffix={changeSuffix || "%"} />}
+        </div>
+      </div>
+      <div style={{ fontSize: 28, fontWeight: 800, color: accent || T.text, fontFamily: "var(--mono)", lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 12, color: T.textLight, marginTop: 5, lineHeight: 1.4, whiteSpace: "pre-line" }}>{sub}</div>}
+    </div>
+  );
+}
+
+function MiniBar({ produced, target, capacity, label, color, hasNote }) {
+  const scale = Math.max(capacity || 0, target || 0, produced || 0, 1);
+  const producedPct = Math.min((produced / scale) * 100, 100);
+  const targetPct = Math.min((target / scale) * 100, 100);
+  const tgtHitPct = target > 0 ? (produced / target) * 100 : null;
+  const capUtilPct = capacity > 0 ? (produced / capacity) * 100 : null;
+  const fixN = (n) => (n != null ? n.toFixed(1) : "—");
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, color: T.text, marginBottom: 5, fontFamily: "var(--mono)", gap: 6 }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 4, fontWeight: 600 }}>
+          {label}{hasNote && <span style={{ fontSize: 12, opacity: 0.5 }}>💬</span>}
+        </span>
+        <span style={{ fontSize: 11 }}>
+          <span style={{ color: T.text, fontWeight: 700 }}>{fmt(produced)}</span>
+          <span style={{ color: T.textMid }}> / {fmt(target)} tgt · {fmt(capacity)} cap</span>
+        </span>
+      </div>
+      <div style={{ position: "relative", height: 14, background: T.barBg, borderRadius: 5, marginTop: 6, marginBottom: 4 }}>
+        <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${producedPct}%`, background: color, borderRadius: 5, transition: "width 0.8s ease" }} />
+        {target > 0 && (
+          <div title={`Target: ${fmt(target)}`} style={{ position: "absolute", left: `calc(${targetPct}% - 1px)`, top: -4, height: 22, width: 2, background: T.text, borderRadius: 1 }} />
+        )}
+      </div>
+      <div style={{ position: "relative", height: 14, fontSize: 10, fontFamily: "var(--mono)", color: T.textLight, marginTop: 2 }}>
+        <span style={{ position: "absolute", left: 0 }}>0</span>
+        {target > 0 && (
+          <span style={{ position: "absolute", left: `${targetPct}%`, transform: "translateX(-50%)", color: T.text, fontWeight: 700, whiteSpace: "nowrap" }}>↑ tgt</span>
+        )}
+        <span style={{ position: "absolute", right: 0 }}>cap</span>
+      </div>
+      <div style={{ display: "flex", gap: 14, marginTop: 6, fontSize: 11, fontFamily: "var(--mono)", color: T.textMid }}>
+        <span>Tgt hit: <span style={{ color, fontWeight: 700 }}>{fixN(tgtHitPct)}%</span></span>
+        <span>Cap util: <span style={{ color: T.text, fontWeight: 600 }}>{fixN(capUtilPct)}%</span></span>
+      </div>
+    </div>
+  );
+}
+
+
+
+function NotesPanel({ entries, expanded, onToggle }) {
+  const withNotes = [...entries].sort((a, b) => b.date.localeCompare(a.date)).filter(e => e.notes);
+  return (
+    <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden", marginBottom: 18 }}>
+      <button onClick={onToggle} style={{ width: "100%", padding: "12px 16px", background: "none", border: "none", color: T.text, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}>
+        <span style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>Shift Notes ({withNotes.length})</span>
+        <span style={{ fontSize: 14, color: T.textFaint, transition: "transform 0.3s", transform: expanded ? "rotate(180deg)" : "rotate(0)" }}>▼</span>
+      </button>
+      {expanded && (
+        <div style={{ padding: "0 16px 14px", maxHeight: 200, overflowY: "auto" }}>
+          {withNotes.length === 0 && <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic", padding: "8px 0" }}>No notes yet</div>}
+          {withNotes.map(e => (
+            <div key={e.date} style={{ padding: "8px 0", borderBottom: `1px solid ${T.border}`, display: "flex", gap: 12 }}>
+              <span style={{ fontSize: 11, color: T.textMid, fontFamily: "var(--mono)", whiteSpace: "nowrap", minWidth: 65 }}>{formatDate(e.date)}</span>
+              <span style={{ fontSize: 11, color: T.textLight, lineHeight: 1.4 }}>{e.notes}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MonthComparison({ data }) {
+  const available = {};
+  data.forEach(e => {
+    const d = new Date(e.date + "T12:00:00");
+    const key = `${d.getFullYear()}-${String(d.getMonth()).padStart(2, "0")}`;
+    const label = `${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+    if (!available[key]) available[key] = { key, label, entries: [] };
+    available[key].entries.push(e);
+  });
+  const options = Object.values(available).sort((a, b) => b.key.localeCompare(a.key));
+  const now = new Date();
+  const curKey = `${now.getFullYear()}-${String(now.getMonth()).padStart(2, "0")}`;
+  const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const prevKey = `${prevMonth.getFullYear()}-${String(prevMonth.getMonth()).padStart(2, "0")}`;
+  const [monthA, setMonthA] = useState(curKey);
+  const [monthB, setMonthB] = useState(prevKey);
+  const sum = (arr, k) => arr.reduce((s, e) => s + (e[k] || 0), 0);
+  const aE = available[monthA]?.entries || [], bE = available[monthB]?.entries || [];
+  const aP = sum(aE, "line1_produced") + sum(aE, "line2_produced"), aT = sum(aE, "line1_target") + sum(aE, "line2_target"), aC = sum(aE, "line1_capacity") + sum(aE, "line2_capacity");
+  const bP = sum(bE, "line1_produced") + sum(bE, "line2_produced"), bT = sum(bE, "line1_target") + sum(bE, "line2_target"), bC = sum(bE, "line1_capacity") + sum(bE, "line2_capacity");
+  const aEff = aT > 0 ? (aP / aT * 100) : null, bEff = bT > 0 ? (bP / bT * 100) : null;
+  const aCU = aC > 0 ? (aP / aC * 100) : null, bCU = bC > 0 ? (bP / bC * 100) : null;
+  const fix = (n) => (n != null ? n.toFixed(1) : "—");
+  const maxVal = Math.max(aP, bP, aC, bC, 1);
+
+  const selStyle = { background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 5, color: T.text, padding: "5px 8px", fontSize: 11, fontFamily: "var(--mono)", outline: "none", cursor: "pointer" };
+
+  const Bar = ({ val, target, cap, color, label, days, eff, cu }) => (
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", color: T.text, marginBottom: 8, fontFamily: "var(--mono)", fontWeight: 600 }}>{label} <span style={{ color: T.textMid, fontWeight: 400 }}>({days}d)</span></div>
+      <div style={{ height: 80, display: "flex", alignItems: "flex-end", marginBottom: 8, position: "relative" }}>
+        <div style={{ flex: 1, position: "relative", height: "100%" }}>
+          <div title={`Capacity: ${fmt(cap)}`} style={{ height: `${(cap / maxVal) * 100}%`, background: T.barBgFaint, borderRadius: "4px 4px 0 0", position: "absolute", bottom: 0, left: 0, right: 0, border: `1px dashed ${T.borderStrong}` }} />
+          <div title={`Produced: ${fmt(val)}`} style={{ height: `${(val / maxVal) * 100}%`, background: color, borderRadius: "4px 4px 0 0", minHeight: val > 0 ? 4 : 0, position: "absolute", bottom: 0, left: 0, right: 0, zIndex: 1, transition: "height 0.8s ease" }} />
+          {target > 0 && (
+            <div title={`Target: ${fmt(target)}`} style={{ position: "absolute", bottom: `${(target / maxVal) * 100}%`, left: -3, right: -3, height: 2, background: T.text, zIndex: 2 }} />
+          )}
+        </div>
+      </div>
+      <div style={{ fontFamily: "var(--mono)" }}>
+        <div style={{ fontSize: 18, fontWeight: 700, color }}>{fmt(val)}</div>
+        <div style={{ fontSize: 11, color: T.textMid }}>Tgt hit: <span style={{ fontWeight: 600, color: T.text }}>{eff}%</span> · Cap util: <span style={{ fontWeight: 600, color: T.text }}>{cu}%</span></div>
+      </div>
+    </div>
+  );
+
+  const Legend = () => (
+    <div style={{ display: "flex", gap: 14, fontSize: 11, fontFamily: "var(--mono)", color: T.textMid, flexWrap: "wrap", marginBottom: 10 }}>
+      <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ display: "inline-block", width: 10, height: 8, background: T.teal, borderRadius: 2 }} /> Produced</span>
+      <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ display: "inline-block", width: 14, height: 2, background: T.text }} /> Target line</span>
+      <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ display: "inline-block", width: 10, height: 8, background: "transparent", border: `1px dashed ${T.borderStrong}`, borderRadius: 2 }} /> Capacity</span>
+    </div>
+  );
+
+  return (
+    <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 18, marginBottom: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
+        <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>Month vs Month</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <select value={monthA} onChange={e => setMonthA(e.target.value)} style={selStyle}>{options.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}</select>
+          <span style={{ fontSize: 12, color: T.textFaint, fontFamily: "var(--mono)" }}>vs</span>
+          <select value={monthB} onChange={e => setMonthB(e.target.value)} style={selStyle}>{options.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}</select>
+          {(uniqueProducts(aE).length > 1 || uniqueProducts(bE).length > 1) && <SkuTag kind="mixed" />}
+        </div>
+      </div>
+      {options.length < 1 ? (
+        <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic", padding: 10 }}>Need at least 1 month of data</div>
+      ) : (
+        <>
+          <Legend />
+          <div style={{ display: "flex", gap: 20 }}>
+            <Bar val={aP} target={aT} cap={aC} color={T.teal} label={available[monthA]?.label || monthA} days={aE.length} eff={fix(aEff)} cu={fix(aCU)} />
+            <div style={{ width: 1, background: T.border }} />
+            <Bar val={bP} target={bT} cap={bC} color={T.textMid} label={available[monthB]?.label || monthB} days={bE.length} eff={fix(bEff)} cu={fix(bCU)} />
+          </div>
+          <div style={{ marginTop: 10, display: "flex", gap: 14, fontSize: 12, fontFamily: "var(--mono)", color: T.textLight, borderTop: `1px solid ${T.border}`, paddingTop: 8, flexWrap: "wrap" }}>
+            <span title="Change in % of target hit (plant performance), not a change in the target itself">Tgt hit Δ: <ChangeIndicator value={ppDelta(aEff, bEff)} suffix="pp" /></span>
+            <span><span style={{ color: T.teal, fontWeight: 600 }}>{fix(aEff)}%</span> vs <span style={{ fontWeight: 600 }}>{fix(bEff)}%</span></span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function FillerCard({ entries, line }) {
+  const recent = [...entries].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+  const startKey = line === 1 ? "line1_filler_start" : "line2_filler_start";
+  const targetKey = line === 1 ? "line1_filler_target" : "line2_filler_target";
+  return (
+    <div>
+      <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, marginBottom: 10, fontFamily: "var(--mono)" }}>
+        Line {line === 1 ? "I" : "II"} — Filler Start vs Target
+      </div>
+      {recent.length === 0 && <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic" }}>No data</div>}
+      {recent.map(e => {
+        const ft = e[targetKey] || DEFAULT_FILLER_TARGET;
+        const diff = minutesDiff(e[startKey], ft);
+        const isLate = diff !== null && diff > 0, isOnTime = diff !== null && diff <= 0;
+        return (
+          <div key={e.date} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${T.border}`, fontSize: 12, fontFamily: "var(--mono)" }}>
+            <span style={{ color: T.textMid, minWidth: 55 }}>{formatDate(e.date)}</span>
+            <span style={{ color: T.textLight, fontSize: 12 }}>tgt {formatTime12(ft)}</span>
+            <span style={{ color: T.textMid }}>{formatTime12(e[startKey])}</span>
+            <span style={{ fontWeight: 600, fontSize: 11, padding: "2px 8px", borderRadius: 4, color: isLate ? T.coral : isOnTime ? T.teal : T.textFaint, background: isLate ? T.coralBg : isOnTime ? T.tealBg : "transparent" }}>
+              {formatMinDiff(diff)}
+            </span>
+          </div>
+        );
+      })}
+      {(() => {
+        const diffs = recent.map(e => minutesDiff(e[startKey], e[targetKey] || DEFAULT_FILLER_TARGET)).filter(d => d !== null);
+        if (diffs.length === 0) return null;
+        const avg = diffs.reduce((s, d) => s + d, 0) / diffs.length;
+        return (
+          <div style={{ marginTop: 8, padding: "6px 10px", background: T.barBg, borderRadius: 6, fontSize: 12, fontFamily: "var(--mono)", color: T.textLight, display: "flex", justifyContent: "space-between" }}>
+            <span>5-day avg</span>
+            <span style={{ color: avg > 0 ? T.coral : T.teal, fontWeight: 600 }}>{formatMinDiff(Math.round(avg))}</span>
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
+function WeekComparison({ data, now }) {
+  const thisMonday = getMonday(now);
+  const lastMonday = new Date(thisMonday); lastMonday.setDate(lastMonday.getDate() - 7);
+  const lastSunday = new Date(thisMonday); lastSunday.setDate(lastSunday.getDate() - 1);
+  const tw = data.filter(d => { const dd = new Date(d.date + "T12:00:00"); return dd >= thisMonday && dd <= now; });
+  const lw = data.filter(d => { const dd = new Date(d.date + "T12:00:00"); return dd >= lastMonday && dd <= lastSunday; });
+  const s = (a, k) => a.reduce((s, e) => s + (e[k] || 0), 0);
+  const twP = s(tw, "line1_produced") + s(tw, "line2_produced"), twC = s(tw, "line1_capacity") + s(tw, "line2_capacity"), twT = s(tw, "line1_target") + s(tw, "line2_target");
+  const lwP = s(lw, "line1_produced") + s(lw, "line2_produced"), lwC = s(lw, "line1_capacity") + s(lw, "line2_capacity"), lwT = s(lw, "line1_target") + s(lw, "line2_target");
+  const twE = twT > 0 ? (twP / twT * 100) : null, lwE = lwT > 0 ? (lwP / lwT * 100) : null;
+  const fix = (n) => (n != null ? n.toFixed(1) : "—");
+  const maxVal = Math.max(twP, lwP, twC, lwC, 1);
+
+  const Bar = ({ val, target, cap, color, label, days }) => (
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", color: T.text, marginBottom: 8, fontFamily: "var(--mono)", fontWeight: 600 }}>{label} <span style={{ color: T.textMid, fontWeight: 400 }}>({days}d)</span></div>
+      <div style={{ height: 80, display: "flex", alignItems: "flex-end", marginBottom: 8 }}>
+        <div style={{ flex: 1, position: "relative", height: "100%" }}>
+          <div title={`Capacity: ${fmt(cap)}`} style={{ height: `${(cap / maxVal) * 100}%`, background: T.barBgFaint, borderRadius: "4px 4px 0 0", position: "absolute", bottom: 0, left: 0, right: 0, border: `1px dashed ${T.borderStrong}` }} />
+          <div title={`Produced: ${fmt(val)}`} style={{ height: `${(val / maxVal) * 100}%`, background: color, borderRadius: "4px 4px 0 0", minHeight: val > 0 ? 4 : 0, position: "absolute", bottom: 0, left: 0, right: 0, zIndex: 1, transition: "height 0.8s ease" }} />
+          {target > 0 && (
+            <div title={`Target: ${fmt(target)}`} style={{ position: "absolute", bottom: `${(target / maxVal) * 100}%`, left: -3, right: -3, height: 2, background: T.text, zIndex: 2 }} />
+          )}
+        </div>
+      </div>
+      <div style={{ fontFamily: "var(--mono)" }}><div style={{ fontSize: 18, fontWeight: 700, color }}>{fmt(val)}</div></div>
+    </div>
+  );
+
+  const Legend = () => (
+    <div style={{ display: "flex", gap: 14, fontSize: 11, fontFamily: "var(--mono)", color: T.textMid, flexWrap: "wrap", marginBottom: 10 }}>
+      <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ display: "inline-block", width: 10, height: 8, background: T.teal, borderRadius: 2 }} /> Produced</span>
+      <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ display: "inline-block", width: 14, height: 2, background: T.text }} /> Target line</span>
+      <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ display: "inline-block", width: 10, height: 8, background: "transparent", border: `1px dashed ${T.borderStrong}`, borderRadius: 2 }} /> Capacity</span>
+    </div>
+  );
+
+  return (
+    <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 8 }}>
+        <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>This Week vs Last Week</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {(uniqueProducts(tw).length > 1 || uniqueProducts(lw).length > 1) && <SkuTag kind="mixed" />}
+          <span title="Change in % of target hit (plant performance), not a change in the target itself"><ChangeIndicator value={ppDelta(twE, lwE)} suffix="pp tgt" /></span>
+        </div>
+      </div>
+      <Legend />
+      <div style={{ display: "flex", gap: 20 }}>
+        <Bar val={twP} target={twT} cap={twC} color={T.teal} label="This Week" days={tw.length} />
+        <div style={{ width: 1, background: T.border }} />
+        <Bar val={lwP} target={lwT} cap={lwC} color={T.textMid} label="Last Week" days={lw.length} />
+      </div>
+      <div style={{ marginTop: 10, display: "flex", gap: 14, fontSize: 12, fontFamily: "var(--mono)", color: T.textLight, borderTop: `1px solid ${T.border}`, paddingTop: 8 }}>
+        <span>Tgt hit: <span style={{ color: T.teal, fontWeight: 600 }}>{fix(twE)}%</span> vs <span style={{ fontWeight: 600 }}>{fix(lwE)}%</span></span>
+      </div>
+    </div>
+  );
+}
+
+function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
+  const yest = new Date(); yest.setDate(yest.getDate() - 1);
+  const [date, setDate] = useState(initialDate || yest.toISOString().split("T")[0]);
+  const [product, setProduct] = useState("Sunberry");
+  const [daily, setDaily] = useState({ line1_produced: "", line1_filler_start: "", line2_produced: "", line2_filler_start: "", notes: "" });
+  const [defaults, setDefaults] = useState(null);
+  const [existingSpecs, setExistingSpecs] = useState(null);
+  const [editingDefaults, setEditingDefaults] = useState(false);
+  const [draftDefaults, setDraftDefaults] = useState(null);
+  const [savingDefaults, setSavingDefaults] = useState(false);
+
+  const isManager = userRole === "manager";
+  const isEditing = !!existingSpecs;
+  const activeSpecs = existingSpecs || defaults;
+
+  useEffect(() => {
+    const e = existingData.find(d => d.date === date);
+    if (e) {
+      setDaily({
+        line1_produced: e.line1_produced?.toString() || "",
+        line1_filler_start: e.line1_filler_start || "",
+        line2_produced: e.line2_produced?.toString() || "",
+        line2_filler_start: e.line2_filler_start || "",
+        notes: e.notes || "",
+      });
+      setProduct(e.product || "Sunberry");
+      setExistingSpecs({
+        line1_target: e.line1_target,
+        line1_capacity: e.line1_capacity,
+        line1_filler_target: e.line1_filler_target || "07:00",
+        line2_target: e.line2_target,
+        line2_capacity: e.line2_capacity,
+        line2_filler_target: e.line2_filler_target || "07:00",
+      });
+    } else {
+      setDaily({ line1_produced: "", line1_filler_start: "", line2_produced: "", line2_filler_start: "", notes: "" });
+      setExistingSpecs(null);
+    }
+  }, [date]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from("product_defaults")
+        .select("*")
+        .eq("product", product)
+        .single();
+      if (cancelled) return;
+      if (error) { console.error("defaults fetch failed", error); setDefaults(null); return; }
+      setDefaults({
+        line1_target: data.line1_target,
+        line1_capacity: data.line1_capacity,
+        line1_filler_target: trimTime(data.line1_filler_target) || "07:00",
+        line2_target: data.line2_target,
+        line2_capacity: data.line2_capacity,
+        line2_filler_target: trimTime(data.line2_filler_target) || "07:00",
+      });
+    })();
+    return () => { cancelled = true; };
+  }, [product]);
+
+  const updateDaily = (k, v) => setDaily(p => ({ ...p, [k]: v }));
+  const updateDraft = (k, v) => setDraftDefaults(p => ({ ...p, [k]: v }));
+
+  const startEditDefaults = () => { setDraftDefaults({ ...defaults }); setEditingDefaults(true); };
+  const cancelEditDefaults = () => { setEditingDefaults(false); setDraftDefaults(null); };
+
+  const saveDefaultsToDb = async () => {
+    setSavingDefaults(true);
+    const payload = {
+      product,
+      line1_target: parseInt(draftDefaults.line1_target) || 0,
+      line1_capacity: parseInt(draftDefaults.line1_capacity) || 0,
+      line1_filler_target: draftDefaults.line1_filler_target || null,
+      line2_target: parseInt(draftDefaults.line2_target) || 0,
+      line2_capacity: parseInt(draftDefaults.line2_capacity) || 0,
+      line2_filler_target: draftDefaults.line2_filler_target || null,
+    };
+    const { error } = await supabase.from("product_defaults").upsert(payload, { onConflict: "product" });
+    setSavingDefaults(false);
+    if (error) { alert("Could not save defaults: " + error.message); return; }
+    setDefaults({
+      line1_target: payload.line1_target,
+      line1_capacity: payload.line1_capacity,
+      line1_filler_target: payload.line1_filler_target || "07:00",
+      line2_target: payload.line2_target,
+      line2_capacity: payload.line2_capacity,
+      line2_filler_target: payload.line2_filler_target || "07:00",
+    });
+    setEditingDefaults(false);
+    setDraftDefaults(null);
+  };
+
+  const handleSave = () => {
+    if (!activeSpecs) { alert("Defaults not loaded yet — try again in a moment."); return; }
+    onSave({
+      date,
+      product,
+      line1_produced: parseInt(daily.line1_produced) || 0,
+      line1_target: activeSpecs.line1_target,
+      line1_capacity: activeSpecs.line1_capacity,
+      line1_filler_start: daily.line1_filler_start,
+      line1_filler_target: activeSpecs.line1_filler_target,
+      line2_produced: parseInt(daily.line2_produced) || 0,
+      line2_target: activeSpecs.line2_target,
+      line2_capacity: activeSpecs.line2_capacity,
+      line2_filler_start: daily.line2_filler_start,
+      line2_filler_target: activeSpecs.line2_filler_target,
+      notes: daily.notes.trim(),
+    });
+  };
+
+  const S = { background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 6, color: T.text, padding: "10px 12px", fontSize: 14, fontFamily: "var(--mono)", width: "100%", boxSizing: "border-box", outline: "none" };
+  const L = { fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", color: T.textLight, marginBottom: 4, fontFamily: "var(--mono)" };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: T.modalOverlay, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(10px)" }}>
+      <div style={{ background: T.modalBg, border: `1px solid ${T.borderStrong}`, borderRadius: 16, padding: 28, width: "92%", maxWidth: 620, maxHeight: "92vh", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.15)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+          <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: T.text, fontFamily: "var(--body)" }}>+ Log Production</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: T.textLight, fontSize: 28, cursor: "pointer" }}>×</button>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
+          <div>
+            <div style={L}>Date</div>
+            <input type="date" value={date} onChange={e => setDate(e.target.value)} style={S} />
+            <div style={{ fontSize: 11, color: T.textFaint, marginTop: 3 }}>Defaults to yesterday</div>
+          </div>
+          <div>
+            <div style={L}>Product</div>
+            <select value={product} onChange={e => setProduct(e.target.value)} style={{ ...S, cursor: isEditing ? "not-allowed" : "pointer", opacity: isEditing ? 0.6 : 1 }} disabled={isEditing}>
+              {["Sunberry", "Arizona/Sunberry", "Arizona", "Other"].map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+            {isEditing && <div style={{ fontSize: 11, color: T.textFaint, marginTop: 3 }}>Locked — entry already saved with this product</div>}
+          </div>
+        </div>
+
+        <div style={{ padding: "12px 14px", borderRadius: 8, background: T.barBg, marginBottom: 14 }}>
+          {editingDefaults ? (
+            <>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 6, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, letterSpacing: 1.5, textTransform: "uppercase", color: T.textMid, fontFamily: "var(--mono)" }}>Edit Defaults · {product}</div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button onClick={cancelEditDefaults} disabled={savingDefaults} style={{ padding: "5px 10px", borderRadius: 5, border: `1px solid ${T.borderStrong}`, background: "transparent", color: T.textMid, fontSize: 12, fontFamily: "var(--mono)", textTransform: "uppercase", cursor: "pointer" }}>Cancel</button>
+                  <button onClick={saveDefaultsToDb} disabled={savingDefaults} style={{ padding: "5px 10px", borderRadius: 5, border: "none", background: T.teal, color: "#fff", fontSize: 12, fontWeight: 700, fontFamily: "var(--mono)", textTransform: "uppercase", cursor: savingDefaults ? "wait" : "pointer" }}>{savingDefaults ? "Saving..." : "Save Defaults"}</button>
+                </div>
+              </div>
+              {[1, 2].map(n => (
+                <div key={n} style={{ marginBottom: n === 1 ? 10 : 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: n === 1 ? T.teal : T.coral, marginBottom: 6, fontFamily: "var(--mono)" }}>LINE {n === 1 ? "I" : "II"}</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                    <div><div style={L}>Target</div><input type="number" value={draftDefaults?.[`line${n}_target`] ?? ""} onChange={e => updateDraft(`line${n}_target`, e.target.value)} style={S} /></div>
+                    <div><div style={L}>Capacity</div><input type="number" value={draftDefaults?.[`line${n}_capacity`] ?? ""} onChange={e => updateDraft(`line${n}_capacity`, e.target.value)} style={S} /></div>
+                    <div><div style={L}>Filler Tgt</div><input type="time" value={draftDefaults?.[`line${n}_filler_target`] || ""} onChange={e => updateDraft(`line${n}_filler_target`, e.target.value)} style={S} /></div>
+                  </div>
+                </div>
+              ))}
+            </>
+          ) : (
+            <>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 6 }}>
+                <div style={{ fontSize: 12, letterSpacing: 1.5, textTransform: "uppercase", color: T.textMid, fontFamily: "var(--mono)" }}>
+                  {isEditing ? "Specs (saved with this entry)" : `Defaults · ${product}`}
+                </div>
+                {isManager && !isEditing && defaults && (
+                  <button onClick={startEditDefaults} style={{ background: "transparent", border: `1px solid ${T.borderStrong}`, color: T.teal, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)", textTransform: "uppercase", padding: "3px 8px", borderRadius: 4 }}>Edit</button>
+                )}
+              </div>
+              {activeSpecs ? (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, fontSize: 11, fontFamily: "var(--mono)", color: T.textMid }}>
+                  <div>
+                    <span style={{ color: T.teal, fontWeight: 600 }}>L1</span> Tgt {fmt(activeSpecs.line1_target)} · Cap {fmt(activeSpecs.line1_capacity)} · Filler {formatTime12(activeSpecs.line1_filler_target)}
+                  </div>
+                  <div>
+                    <span style={{ color: T.coral, fontWeight: 600 }}>L2</span> Tgt {fmt(activeSpecs.line2_target)} · Cap {fmt(activeSpecs.line2_capacity)} · Filler {formatTime12(activeSpecs.line2_filler_target)}
+                  </div>
+                </div>
+              ) : (
+                <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic" }}>Loading defaults...</div>
+              )}
+            </>
+          )}
+        </div>
+
+        {[{ n: 1, c: T.teal, l: "LINE I" }, { n: 2, c: T.coral, l: "LINE II" }].map(({ n, c, l }) => (
+          <div key={n} style={{ padding: "12px 0", borderTop: `1px solid ${T.border}` }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: c, marginBottom: 10, fontFamily: "var(--mono)" }}>{l}</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <div><div style={L}>Produced</div><input type="number" placeholder="0" value={daily[`line${n}_produced`]} onChange={e => updateDaily(`line${n}_produced`, e.target.value)} style={S} /></div>
+              <div><div style={L}>Filler Actual Start</div><input type="time" value={daily[`line${n}_filler_start`]} onChange={e => updateDaily(`line${n}_filler_start`, e.target.value)} style={S} /></div>
+            </div>
+          </div>
+        ))}
+
+        <div style={{ padding: "12px 0", borderTop: `1px solid ${T.border}` }}>
+          <div style={L}>Shift Notes</div>
+          <textarea value={daily.notes} onChange={e => updateDaily("notes", e.target.value)} placeholder="e.g. Line 2 CIP ran long, short-staffed..." rows={2} style={{ ...S, resize: "vertical", lineHeight: 1.5, minHeight: 48 }} />
+        </div>
+
+        <button onClick={handleSave} disabled={!activeSpecs} style={{ marginTop: 14, width: "100%", padding: "13px", background: activeSpecs ? `linear-gradient(135deg, ${T.teal}, #0C8C87)` : T.textLight, border: "none", borderRadius: 8, color: "#fff", fontSize: 13, fontWeight: 700, cursor: activeSpecs ? "pointer" : "wait", fontFamily: "var(--mono)", letterSpacing: 1, textTransform: "uppercase" }}>Save Entry</button>
+      </div>
+    </div>
+  );
+}
+
+export default function ProductionDashboard({ signOut, userId, userEmail, userRole }) {
+  const [data, setData] = useState([]);
+  const [showEntry, setShowEntry] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [now, setNow] = useState(new Date());
+  const [view, setView] = useState("dashboard");
+  const [notesOpen, setNotesOpen] = useState(false);
+
+  useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t); }, []);
+
+  const loadData = useCallback(async () => {
+    const { data: rows, error } = await supabase
+      .from("production_entries")
+      .select("*")
+      .order("entry_date", { ascending: false });
+    if (error) console.error("load entries failed", error);
+    else setData((rows || []).map(rowToEntry));
+    setLoading(false);
+  }, []);
+  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { const t = setInterval(loadData, 30000); return () => clearInterval(t); }, [loadData]);
+
+  const saveEntry = async (entry) => {
+    const { error } = await supabase
+      .from("production_entries")
+      .upsert(entryToRow(entry), { onConflict: "entry_date" });
+    if (error) { console.error("save entry failed", error); alert("Save failed: " + error.message); return; }
+    await loadData();
+    closeEntry();
+  };
+
+  const [editDate, setEditDate] = useState(null);
+  const openEntry = (date) => { setEditDate(date || null); setShowEntry(true); };
+  const closeEntry = () => { setEditDate(null); setShowEntry(false); };
+
+  const [commentsOpen, setCommentsOpen] = useState(false);
+  const [commentsDate, setCommentsDate] = useState(null);
+  const [commentsRefreshTick, setCommentsRefreshTick] = useState(0);
+  const openComments = (date) => { setCommentsDate(date || null); setCommentsOpen(true); };
+  const closeComments = () => { setCommentsOpen(false); setCommentsDate(null); setCommentsRefreshTick(t => t + 1); };
+
+  const [selectedDate, setSelectedDate] = useState(null);
+
+  const sum = (a, k) => a.reduce((s, e) => s + (e[k] || 0), 0);
+  const sorted = [...data].sort((a, b) => b.date.localeCompare(a.date));
+  const latest = sorted[0] || null, previous = sorted[1] || null;
+  useEffect(() => {
+    if (selectedDate == null && latest) setSelectedDate(latest.date);
+  }, [latest, selectedDate]);
+  const selectedEntry = selectedDate ? data.find(d => d.date === selectedDate) : null;
+  const selTotal = eTotal(selectedEntry), selTarget = eTarget(selectedEntry), selCap = eCap(selectedEntry);
+  const latestTotal = eTotal(latest), latestTarget = eTarget(latest), latestCap = eCap(latest), prevTotal = eTotal(previous);
+  const last5 = sorted.slice(0, 5), prev5 = sorted.slice(5, 10);
+  const avg5 = last5.length > 0 ? last5.reduce((s, e) => s + eTotal(e), 0) / last5.length : 0;
+  const last5Eff = aggEff(last5), prev5Eff = aggEff(prev5);
+  const last5Mixed = uniqueProducts(last5).length > 1 || uniqueProducts(prev5).length > 1;
+  const diffSku = latest && previous && latest.product && previous.product && latest.product !== previous.product;
+  const weekEntries = data.filter(d => { const dd = new Date(d.date + "T12:00:00"); return getWeekNumber(dd) === getWeekNumber(now) && dd.getFullYear() === now.getFullYear(); });
+  const monthEntries = data.filter(d => { const dd = new Date(d.date + "T12:00:00"); return dd.getMonth() === now.getMonth() && dd.getFullYear() === now.getFullYear(); });
+  const weekP = sum(weekEntries, "line1_produced") + sum(weekEntries, "line2_produced"), weekT = sum(weekEntries, "line1_target") + sum(weekEntries, "line2_target");
+  const monthP = sum(monthEntries, "line1_produced") + sum(monthEntries, "line2_produced"), monthT = sum(monthEntries, "line1_target") + sum(monthEntries, "line2_target"), monthC = sum(monthEntries, "line1_capacity") + sum(monthEntries, "line2_capacity");
+  const latestEff = eEff(latest), prevEff = eEff(previous);
+  const weekEff = weekT > 0 ? (weekP / weekT) * 100 : null;
+  const monthEff = monthT > 0 ? (monthP / monthT) * 100 : null;
+  const recent = sorted.slice(0, 7).reverse();
+
+  if (loading) return <div style={{ minHeight: "100vh", background: T.bg, display: "flex", alignItems: "center", justifyContent: "center" }}><div style={{ fontFamily: "'JetBrains Mono', monospace", color: T.textLight }}>Loading...</div></div>;
+
+  return (
+    <div style={{ "--mono": "'JetBrains Mono', monospace", "--body": "'Outfit', sans-serif", minHeight: "100vh", background: T.bg, color: T.text, fontFamily: "var(--body)", position: "relative" }}>
+      <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700;800&family=Outfit:wght@300;400;600;700;800&display=swap" rel="stylesheet" />
+      <div style={{ position: "absolute", inset: 0, opacity: 0.025, backgroundImage: "linear-gradient(rgba(0,0,0,0.3) 1px, transparent 1px), linear-gradient(90deg, rgba(0,0,0,0.3) 1px, transparent 1px)", backgroundSize: "40px 40px", pointerEvents: "none" }} />
+
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 22px", borderBottom: `1px solid ${T.border}`, position: "relative", zIndex: 1, background: T.bg, flexWrap: "wrap", gap: 12, rowGap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flex: "0 1 auto", minWidth: 0 }}>
+          <div style={{ width: 9, height: 9, borderRadius: "50%", background: latest ? T.teal : T.textFaint, boxShadow: latest ? `0 0 10px ${T.teal}` : "none", flexShrink: 0 }} />
+          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 800, letterSpacing: -0.5, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>SUNBERRY FARMS PRODUCTION</h1>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", rowGap: 10 }}>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 22, fontWeight: 700, fontFamily: "var(--mono)", lineHeight: 1, color: T.text }}>{now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</div>
+            <div style={{ fontSize: 12, color: T.textLight, fontFamily: "var(--mono)" }}>{now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</div>
+          </div>
+          <div style={{ display: "flex", gap: 5 }}>
+            {["dashboard", "history"].map(v => (
+              <button key={v} onClick={() => setView(v)} style={{ padding: "7px 12px", borderRadius: 6, border: `1px solid ${T.borderStrong}`, background: view === v ? T.barBg : "transparent", color: T.text, fontSize: 12, cursor: "pointer", fontFamily: "var(--mono)", textTransform: "uppercase" }}>{v === "dashboard" ? "Dash" : "Log"}</button>
+            ))}
+            {userRole !== "viewer" && (
+              <button onClick={() => openEntry(null)} style={{ padding: "7px 12px", borderRadius: 6, border: "none", background: T.teal, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>+ ADD</button>
+            )}
+            <button onClick={() => openComments(null)} title="Add or view comments" style={{ padding: "7px 12px", borderRadius: 6, border: `1px solid ${T.borderStrong}`, background: "transparent", color: T.text, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>💬 Comment</button>
+          </div>
+          {signOut && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: 10, marginLeft: 4, borderLeft: `1px solid ${T.border}` }}>
+              <div style={{ textAlign: "right", fontFamily: "var(--mono)", lineHeight: 1.2, minWidth: 0 }}>
+                <div style={{ fontSize: 12, color: T.text, fontWeight: 600, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={userEmail}>{userEmail}</div>
+                {userRole && <div style={{ fontSize: 10, color: T.textLight, letterSpacing: 1.5, textTransform: "uppercase" }}>{userRole.replace("_", " ")}</div>}
+              </div>
+              <button onClick={signOut} title="Sign out" style={{ padding: "7px 10px", borderRadius: 6, border: `1px solid ${T.borderStrong}`, background: "transparent", color: T.textMid, fontSize: 12, cursor: "pointer", fontFamily: "var(--mono)", textTransform: "uppercase" }}>Sign out</button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {showEntry && <DataEntry onSave={saveEntry} onClose={closeEntry} existingData={data} userRole={userRole} initialDate={editDate} />}
+      {commentsOpen && <CommentsModal onClose={closeComments} initialDate={commentsDate} currentUserId={userId} isManager={userRole === "manager"} />}
+
+      {view === "dashboard" ? (
+        <div style={{ padding: "18px 22px 80px", position: "relative", zIndex: 1 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10, marginBottom: 18 }}>
+            <StatCard title="Latest" titleDetail={latest ? formatDayShort(latest.date) : ""} value={latest ? fmt(latestTotal) : "—"}
+              sub={latest ? `Tgt: ${fmt(latestTarget)} · Cap: ${fmt(latestCap)}\nTgt hit: ${pc(latestTotal, latestTarget)}% · Cap: ${pc(latestTotal, latestCap)}%` : "No entries yet"}
+              accent={perfColor(latestEff)} change={ppDelta(latestEff, prevEff)} changeSuffix="pp vs prev"
+              tag={diffSku ? <SkuTag kind="different" /> : null} />
+            <StatCard title="Previous" titleDetail={previous ? formatDayShort(previous.date) : ""} value={previous ? fmt(prevTotal) : "—"}
+              sub={previous ? `Tgt hit: ${pc(prevTotal, eTarget(previous))}% · Cap: ${pc(prevTotal, eCap(previous))}%` : "—"} accent={perfColor(prevEff)} />
+            <StatCard title="5-Day Avg" value={fmt(Math.round(avg5))}
+              sub={`${last5.length}d rolling · Tgt hit: ${last5Eff != null ? last5Eff.toFixed(1) + "%" : "—"}`}
+              accent={perfColor(last5Eff)} change={ppDelta(last5Eff, prev5Eff)} changeSuffix="pp vs prev 5"
+              tag={last5Mixed ? <SkuTag kind="mixed" /> : null} />
+            <StatCard title="This Week" value={fmt(weekP)} sub={`${weekEntries.length}d · Tgt: ${pc(weekP, weekT)}%`} accent={perfColor(weekEff)} />
+            <StatCard title="This Month" value={fmt(monthP)} sub={`${monthEntries.length}d · Tgt: ${pc(monthP, monthT)}%\nCap: ${pc(monthP, monthC)}%`} accent={perfColor(monthEff)} />
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 14, marginTop: -10, marginBottom: 14, fontSize: 10, fontFamily: "var(--mono)", color: T.textMid }}>
+            <span style={{ letterSpacing: 1, textTransform: "uppercase" }}>Tgt hit color:</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 9, height: 9, background: T.teal, borderRadius: "50%" }} /> ≥ 90% on track</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 9, height: 9, background: T.gold, borderRadius: "50%" }} /> 75–89% watch</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 9, height: 9, background: T.coral, borderRadius: "50%" }} /> {"<"} 75% behind</span>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 12, marginBottom: 18 }}>
+            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16, textAlign: "center" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>
+                  Day View {selectedEntry && <span style={{ color: T.text, fontSize: 11, textTransform: "none", fontWeight: 600 }}>({formatDayShort(selectedEntry.date)} · {selectedEntry.product})</span>}
+                </div>
+                <input type="date" value={selectedDate || ""} max={latest?.date || undefined} onChange={e => setSelectedDate(e.target.value)} style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 5, color: T.text, padding: "5px 9px", fontSize: 12, fontFamily: "var(--mono)", outline: "none", cursor: "pointer" }} />
+              </div>
+              {!selectedEntry && selectedDate && (
+                <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic", padding: "10px 0" }}>No production data for this date.</div>
+              )}
+              <div style={{ display: "flex", justifyContent: "center", gap: 16, flexWrap: "wrap" }}>
+                <DualGauge produced={selectedEntry?.line1_produced || 0} target={selectedEntry?.line1_target || 1} capacity={selectedEntry?.line1_capacity || 1} label="Line I" colorA={T.teal} />
+                <DualGauge produced={selectedEntry?.line2_produced || 0} target={selectedEntry?.line2_target || 1} capacity={selectedEntry?.line2_capacity || 1} label="Line II" colorA={T.coral} />
+                <DualGauge produced={selTotal} target={selTarget || 1} capacity={selCap || 1} label="Combined" colorA={T.gold} />
+              </div>
+              {selectedEntry?.notes && <div style={{ marginTop: 10, padding: "7px 12px", background: T.tealBg, borderRadius: 6, fontSize: 11, color: T.textMid, fontStyle: "italic", textAlign: "left" }}>💬 {selectedEntry.notes}</div>}
+              {selectedDate && (
+                <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.border}`, textAlign: "left" }}>
+                  <CommentsList date={selectedDate} currentUserId={userId} isManager={userRole === "manager"} refreshTick={commentsRefreshTick} onAddClick={() => openComments(selectedDate)} compact />
+                </div>
+              )}
+            </div>
+            <WeekComparison data={data} now={now} />
+          </div>
+
+          <MonthComparison data={data} />
+          <NotesPanel entries={data} expanded={notesOpen} onToggle={() => setNotesOpen(!notesOpen)} />
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 12, marginBottom: 18 }}>
+            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16 }}><FillerCard entries={data} line={1} /></div>
+            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16 }}><FillerCard entries={data} line={2} /></div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 12 }}>
+            {[{ label: "Line I", key: "line1", color: T.teal }, { label: "Line II", key: "line2", color: T.coral }].map(({ label, key, color }) => (
+              <div key={key} style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16 }}>
+                <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, marginBottom: 12, fontFamily: "var(--mono)" }}>Last 7 Days — {label}</div>
+                {recent.length === 0 && <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic" }}>No data yet</div>}
+                {recent.map(e => <MiniBar key={e.date + key} produced={e[`${key}_produced`]} target={e[`${key}_target`]} capacity={e[`${key}_capacity`] || e[`${key}_target`]} label={`${formatDate(e.date)} · ${e.product}`} color={color} hasNote={!!e.notes} />)}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div style={{ padding: "18px 22px 80px", position: "relative", zIndex: 1 }}>
+          <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, overflow: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "var(--mono)", fontSize: 11, minWidth: 950 }}>
+              <thead><tr style={{ borderBottom: `1px solid ${T.borderStrong}` }}>
+                {["Date", "Product", "L1 Prod", "L1 Tgt", "L1 Cap", "L1 Tgt%", "L1 Cap%", "L2 Prod", "L2 Tgt", "L2 Cap", "L2 Tgt%", "L2 Cap%", "Total", "Notes", ""].map(h => (
+                  <th key={h} style={{ padding: "8px 7px", textAlign: h === "Notes" ? "left" : "right", fontSize: 9, letterSpacing: 1.2, textTransform: "uppercase", color: T.textLight, fontWeight: 600, whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>
+                {sorted.map((e, i) => {
+                  const isL = i === 0;
+                  return (
+                    <tr key={e.date} style={{ borderBottom: `1px solid ${T.border}`, background: isL ? T.tealBg : "transparent" }}>
+                      <td style={{ padding: "7px 7px", textAlign: "right", color: isL ? T.teal : T.textMid, fontWeight: isL ? 600 : 400, whiteSpace: "nowrap" }}>{formatDay(e.date)}</td>
+                      <td style={{ padding: "7px 7px", textAlign: "right", color: T.textLight }}>{e.product}</td>
+                      <td style={{ padding: "7px 7px", textAlign: "right", color: T.teal, fontWeight: 600 }}>{fmt(e.line1_produced)}</td>
+                      <td style={{ padding: "7px 7px", textAlign: "right", color: T.textFaint }}>{fmt(e.line1_target)}</td>
+                      <td style={{ padding: "7px 7px", textAlign: "right", color: T.textFaint }}>{fmt(e.line1_capacity)}</td>
+                      <td style={{ padding: "7px 7px", textAlign: "right", color: Number(pc(e.line1_produced, e.line1_target)) >= 50 ? T.teal : T.coral }}>{pc(e.line1_produced, e.line1_target)}%</td>
+                      <td style={{ padding: "7px 7px", textAlign: "right", color: T.textMid }}>{pc(e.line1_produced, e.line1_capacity)}%</td>
+                      <td style={{ padding: "7px 7px", textAlign: "right", color: T.coral, fontWeight: 600 }}>{fmt(e.line2_produced)}</td>
+                      <td style={{ padding: "7px 7px", textAlign: "right", color: T.textFaint }}>{fmt(e.line2_target)}</td>
+                      <td style={{ padding: "7px 7px", textAlign: "right", color: T.textFaint }}>{fmt(e.line2_capacity)}</td>
+                      <td style={{ padding: "7px 7px", textAlign: "right", color: Number(pc(e.line2_produced, e.line2_target)) >= 50 ? T.teal : T.coral }}>{pc(e.line2_produced, e.line2_target)}%</td>
+                      <td style={{ padding: "7px 7px", textAlign: "right", color: T.textMid }}>{pc(e.line2_produced, e.line2_capacity)}%</td>
+                      <td style={{ padding: "7px 7px", textAlign: "right", color: T.text, fontWeight: 700 }}>{fmt(eTotal(e))}</td>
+                      <td style={{ padding: "7px 7px", textAlign: "left", color: T.textFaint, maxWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}>{e.notes || "—"}</td>
+                      <td style={{ padding: "7px 7px", textAlign: "right" }}>{userRole && userRole !== "viewer" && <button onClick={() => openEntry(e.date)} title="Edit entry" style={{ background: "none", border: `1px solid ${T.borderStrong}`, color: T.teal, cursor: "pointer", fontSize: 11, padding: "3px 8px", borderRadius: 4, fontFamily: "var(--mono)" }}>Edit</button>}</td>
+                    </tr>
+                  );
+                })}
+                {data.length === 0 && <tr><td colSpan={15} style={{ padding: 36, textAlign: "center", color: T.textFaint }}>No entries yet. Tap +ADD to start.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, padding: "5px 22px", display: "flex", justifyContent: "space-between", fontSize: 11, color: T.textFaint, fontFamily: "var(--mono)", background: T.footerBg, zIndex: 10, borderTop: `1px solid ${T.border}` }}>
+        <span>Auto-refresh: 30s</span>
+        <span>{data.length} entries</span>
+      </div>
+    </div>
+  );
+}
