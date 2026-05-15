@@ -490,16 +490,46 @@ function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
       line2_capacity: parseInt(draftDefaults.line2_capacity) || 0,
       line2_filler_target: draftDefaults.line2_filler_target || null,
     };
-    const { error } = await supabase.from("product_defaults").upsert(payload, { onConflict: "product" });
+    const { data: saved, error } = await supabase
+      .from("product_defaults")
+      .upsert(payload, { onConflict: "product" })
+      .select()
+      .single();
     setSavingDefaults(false);
-    if (error) { alert("Could not save defaults: " + error.message); return; }
+    if (error || !saved) {
+      alert("Could not save defaults: " + (error?.message || "no row returned — check Supabase RLS / unique constraint on product"));
+      return;
+    }
+    const mismatch =
+      saved.line1_target !== payload.line1_target ||
+      saved.line1_capacity !== payload.line1_capacity ||
+      saved.line2_target !== payload.line2_target ||
+      saved.line2_capacity !== payload.line2_capacity;
+    if (mismatch) {
+      alert("Defaults did not persist correctly. Saved row does not match what was sent — likely a Supabase permission / constraint issue.");
+      return;
+    }
     setDefaults({
-      line1_target: payload.line1_target,
-      line1_capacity: payload.line1_capacity,
-      line1_filler_target: payload.line1_filler_target || "07:00",
-      line2_target: payload.line2_target,
-      line2_capacity: payload.line2_capacity,
-      line2_filler_target: payload.line2_filler_target || "07:00",
+      line1_target: saved.line1_target,
+      line1_capacity: saved.line1_capacity,
+      line1_filler_target: trimTime(saved.line1_filler_target) || "07:00",
+      line2_target: saved.line2_target,
+      line2_capacity: saved.line2_capacity,
+      line2_filler_target: trimTime(saved.line2_filler_target) || "07:00",
+    });
+    setEditingDefaults(false);
+    setDraftDefaults(null);
+  };
+
+  const startEditEntrySpecs = () => { setDraftDefaults({ ...existingSpecs }); setEditingDefaults(true); };
+  const saveEntrySpecsLocal = () => {
+    setExistingSpecs({
+      line1_target: parseInt(draftDefaults.line1_target) || 0,
+      line1_capacity: parseInt(draftDefaults.line1_capacity) || 0,
+      line1_filler_target: draftDefaults.line1_filler_target || "07:00",
+      line2_target: parseInt(draftDefaults.line2_target) || 0,
+      line2_capacity: parseInt(draftDefaults.line2_capacity) || 0,
+      line2_filler_target: draftDefaults.line2_filler_target || "07:00",
     });
     setEditingDefaults(false);
     setDraftDefaults(null);
@@ -554,12 +584,13 @@ function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
           {editingDefaults ? (
             <>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 6, flexWrap: "wrap" }}>
-                <div style={{ fontSize: 12, letterSpacing: 1.5, textTransform: "uppercase", color: T.textMid, fontFamily: "var(--mono)" }}>Edit Defaults · {product}</div>
+                <div style={{ fontSize: 12, letterSpacing: 1.5, textTransform: "uppercase", color: T.textMid, fontFamily: "var(--mono)" }}>{isEditing ? "Edit Specs for This Entry" : `Edit Defaults · ${product}`}</div>
                 <div style={{ display: "flex", gap: 6 }}>
                   <button onClick={cancelEditDefaults} disabled={savingDefaults} style={{ padding: "5px 10px", borderRadius: 5, border: `1px solid ${T.borderStrong}`, background: "transparent", color: T.textMid, fontSize: 12, fontFamily: "var(--mono)", textTransform: "uppercase", cursor: "pointer" }}>Cancel</button>
-                  <button onClick={saveDefaultsToDb} disabled={savingDefaults} style={{ padding: "5px 10px", borderRadius: 5, border: "none", background: T.teal, color: "#fff", fontSize: 12, fontWeight: 700, fontFamily: "var(--mono)", textTransform: "uppercase", cursor: savingDefaults ? "wait" : "pointer" }}>{savingDefaults ? "Saving..." : "Save Defaults"}</button>
+                  <button onClick={isEditing ? saveEntrySpecsLocal : saveDefaultsToDb} disabled={savingDefaults} style={{ padding: "5px 10px", borderRadius: 5, border: "none", background: T.teal, color: "#fff", fontSize: 12, fontWeight: 700, fontFamily: "var(--mono)", textTransform: "uppercase", cursor: savingDefaults ? "wait" : "pointer" }}>{savingDefaults ? "Saving..." : (isEditing ? "Apply" : "Save Defaults")}</button>
                 </div>
               </div>
+              {isEditing && <div style={{ fontSize: 11, color: T.textFaint, marginBottom: 8, fontFamily: "var(--mono)" }}>Applies to this entry only — saved when you click Save Entry below.</div>}
               {[1, 2].map(n => (
                 <div key={n} style={{ marginBottom: n === 1 ? 10 : 0 }}>
                   <div style={{ fontSize: 12, fontWeight: 600, color: n === 1 ? T.teal : T.coral, marginBottom: 6, fontFamily: "var(--mono)" }}>LINE {n === 1 ? "I" : "II"}</div>
@@ -579,6 +610,9 @@ function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
                 </div>
                 {isManager && !isEditing && defaults && (
                   <button onClick={startEditDefaults} style={{ background: "transparent", border: `1px solid ${T.borderStrong}`, color: T.teal, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)", textTransform: "uppercase", padding: "3px 8px", borderRadius: 4 }}>Edit</button>
+                )}
+                {isManager && isEditing && existingSpecs && (
+                  <button onClick={startEditEntrySpecs} style={{ background: "transparent", border: `1px solid ${T.borderStrong}`, color: T.teal, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)", textTransform: "uppercase", padding: "3px 8px", borderRadius: 4 }}>Edit</button>
                 )}
               </div>
               {activeSpecs ? (
