@@ -122,22 +122,22 @@ function DualGauge({ produced, target, capacity, label, colorA, size = 115 }) {
       <svg width={size} height={size / 2 + 24} viewBox={`0 0 ${size} ${size / 2 + 24}`}>
         <path d={`M 8,${cy} A ${r1},${r1} 0 0 1 ${size - 8},${cy}`} fill="none" stroke={T.gaugeBg} strokeWidth="8" strokeLinecap="round" />
         <path d={`M 8,${cy} A ${r1},${r1} 0 0 1 ${size - 8},${cy}`} fill="none" stroke={colorA} strokeWidth="8" strokeLinecap="round"
-          strokeDasharray={circ1} strokeDashoffset={circ1 - tPct * circ1} style={{ transition: "stroke-dashoffset 1.2s ease" }} />
+          strokeDasharray={circ1} strokeDashoffset={circ1 - cPct * circ1} style={{ transition: "stroke-dashoffset 1.2s ease" }} />
         <path d={`M ${8 + 14},${cy} A ${r2},${r2} 0 0 1 ${size - 8 - 14},${cy}`} fill="none" stroke={T.gaugeInnerBg} strokeWidth="6" strokeLinecap="round" />
         <path d={`M ${8 + 14},${cy} A ${r2},${r2} 0 0 1 ${size - 8 - 14},${cy}`} fill="none" stroke={innerStroke} strokeWidth="6" strokeLinecap="round"
-          strokeDasharray={circ2} strokeDashoffset={circ2 - cPct * circ2} style={{ transition: "stroke-dashoffset 1.2s ease" }} />
-        <text x={size / 2} y={cy - 6} textAnchor="middle" fill={T.text} fontSize="22" fontWeight="700" fontFamily="var(--mono)">{(tPct * 100).toFixed(1)}%</text>
+          strokeDasharray={circ2} strokeDashoffset={circ2 - tPct * circ2} style={{ transition: "stroke-dashoffset 1.2s ease" }} />
+        <text x={size / 2} y={cy - 6} textAnchor="middle" fill={T.text} fontSize="22" fontWeight="700" fontFamily="var(--mono)">{(cPct * 100).toFixed(1)}%</text>
       </svg>
       <div style={{ display: "flex", justifyContent: "center", gap: 12, fontFamily: "var(--mono)", marginTop: -2 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
           <span style={{ display: "inline-block", width: 10, height: 3, background: colorA, borderRadius: 2 }} />
-          <span style={{ fontSize: 11, color: T.text, fontWeight: 700 }}>{(tPct * 100).toFixed(1)}%</span>
-          <span style={{ fontSize: 9, color: T.textMid, letterSpacing: 1, textTransform: "uppercase" }}>tgt</span>
+          <span style={{ fontSize: 11, color: T.text, fontWeight: 700 }}>{(cPct * 100).toFixed(1)}%</span>
+          <span style={{ fontSize: 9, color: T.textMid, letterSpacing: 1, textTransform: "uppercase" }}>cap</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
           <span style={{ display: "inline-block", width: 10, height: 3, background: innerStroke, borderRadius: 2 }} />
-          <span style={{ fontSize: 11, color: T.text, fontWeight: 700 }}>{(cPct * 100).toFixed(1)}%</span>
-          <span style={{ fontSize: 9, color: T.textMid, letterSpacing: 1, textTransform: "uppercase" }}>cap</span>
+          <span style={{ fontSize: 11, color: T.text, fontWeight: 700 }}>{(tPct * 100).toFixed(1)}%</span>
+          <span style={{ fontSize: 9, color: T.textMid, letterSpacing: 1, textTransform: "uppercase" }}>tgt</span>
         </div>
       </div>
       <div style={{ fontSize: 12, color: T.text, marginTop: 6, letterSpacing: 1.5, textTransform: "uppercase", fontFamily: "var(--mono)", fontWeight: 700 }}>{label}</div>
