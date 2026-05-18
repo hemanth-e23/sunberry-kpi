@@ -48,6 +48,30 @@ function getWeekNumber(d) {
   const week1 = new Date(date.getFullYear(), 0, 4);
   return Math.round(((date - week1) / 86400000 + week1.getDay() + 1) / 7);
 }
+function localDateStr(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function workingDaysInMonth(year, month) {
+  const last = new Date(year, month + 1, 0).getDate();
+  let count = 0;
+  for (let day = 1; day <= last; day++) {
+    const dow = new Date(year, month, day).getDay();
+    if (dow !== 0 && dow !== 6) count++;
+  }
+  return count;
+}
+function workingDaysRemaining(year, month, fromDay) {
+  const last = new Date(year, month + 1, 0).getDate();
+  let count = 0;
+  for (let day = fromDay; day <= last; day++) {
+    const dow = new Date(year, month, day).getDay();
+    if (dow !== 0 && dow !== 6) count++;
+  }
+  return count;
+}
 function getMonday(d) {
   const date = new Date(d); const day = date.getDay();
   date.setDate(date.getDate() - day + (day === 0 ? -6 : 1)); date.setHours(0, 0, 0, 0); return date;
@@ -146,19 +170,146 @@ function DualGauge({ produced, target, capacity, label, colorA, size = 115 }) {
 }
 
 function StatCard({ title, titleDetail, value, sub, accent, change, changeSuffix, tag }) {
+  const hasMeta = !!tag || change !== undefined;
   return (
     <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 10, padding: "14px 16px", flex: 1, minWidth: 0 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5, gap: 6 }}>
-        <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)", minWidth: 0 }}>
-          {title}{titleDetail && <span style={{ color: T.text, marginLeft: 6, fontSize: 11, textTransform: "none", fontWeight: 600 }}>{titleDetail}</span>}
+      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5, gap: "4px 8px" }}>
+        <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)", minWidth: 0, flex: "1 1 auto" }}>
+          {title}
+          {titleDetail && <span style={{ color: T.text, marginLeft: 6, fontSize: 11, textTransform: "none", fontWeight: 600, whiteSpace: "nowrap" }}>{titleDetail}</span>}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
-          {tag}
-          {change !== undefined && <ChangeIndicator value={change} suffix={changeSuffix || "%"} />}
-        </div>
+        {hasMeta && (
+          <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0, flexWrap: "wrap" }}>
+            {tag}
+            {change !== undefined && <ChangeIndicator value={change} suffix={changeSuffix || "%"} />}
+          </div>
+        )}
       </div>
       <div style={{ fontSize: 28, fontWeight: 800, color: accent || T.text, fontFamily: "var(--mono)", lineHeight: 1 }}>{value}</div>
       {sub && <div style={{ fontSize: 12, color: T.textLight, marginTop: 5, lineHeight: 1.4, whiteSpace: "pre-line" }}>{sub}</div>}
+    </div>
+  );
+}
+
+function MonthlyProgressCard({ monthEntries, now, isManager }) {
+  const monthKey = `${now.getFullYear()}-${String(now.getMonth()).padStart(2, "0")}`;
+  const storageKey = `monthlyTarget:${monthKey}`;
+  const [targets, setTargets] = useState(() => {
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) return JSON.parse(raw);
+    } catch {}
+    return { line1: 0, line2: 0 };
+  });
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(targets);
+  useEffect(() => { setDraft(targets); }, [targets]);
+
+  const saveTargets = () => {
+    const next = { line1: parseInt(draft.line1) || 0, line2: parseInt(draft.line2) || 0 };
+    setTargets(next);
+    try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch {}
+    setEditing(false);
+  };
+
+  const l1Produced = monthEntries.reduce((s, e) => s + (e.line1_produced || 0), 0);
+  const l2Produced = monthEntries.reduce((s, e) => s + (e.line2_produced || 0), 0);
+  const totalProduced = l1Produced + l2Produced;
+  const totalTarget = (targets.line1 || 0) + (targets.line2 || 0);
+
+  const today = now.getDate();
+  const totalWD = workingDaysInMonth(now.getFullYear(), now.getMonth());
+  const remainingWD = workingDaysRemaining(now.getFullYear(), now.getMonth(), today + 1);
+  const elapsedWD = Math.max(totalWD - remainingWD, 1);
+  const daysWithData = monthEntries.length;
+
+  const dailyL1 = daysWithData > 0 ? l1Produced / daysWithData : 0;
+  const dailyL2 = daysWithData > 0 ? l2Produced / daysWithData : 0;
+  const projectedL1 = l1Produced + dailyL1 * remainingWD;
+  const projectedL2 = l2Produced + dailyL2 * remainingWD;
+
+  const requiredL1 = remainingWD > 0 ? Math.max(0, (targets.line1 - l1Produced) / remainingWD) : 0;
+  const requiredL2 = remainingWD > 0 ? Math.max(0, (targets.line2 - l2Produced) / remainingWD) : 0;
+
+  const Bar = ({ produced, target, color, label }) => {
+    const pct = target > 0 ? Math.min((produced / target) * 100, 100) : 0;
+    const pctRaw = target > 0 ? (produced / target) * 100 : 0;
+    return (
+      <div style={{ marginBottom: 8 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, fontFamily: "var(--mono)", marginBottom: 3 }}>
+          <span style={{ color, fontWeight: 700 }}>{label}</span>
+          <span style={{ color: T.text, fontWeight: 600 }}>
+            {fmt(produced)}<span style={{ color: T.textMid, fontWeight: 400 }}> / {target > 0 ? fmt(target) : "—"}</span>
+            {target > 0 && <span style={{ color: T.textMid, marginLeft: 6 }}>({pctRaw.toFixed(1)}%)</span>}
+          </span>
+        </div>
+        <div style={{ position: "relative", height: 10, background: T.barBg, borderRadius: 4, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${pct}%`, background: color, transition: "width 0.8s ease" }} />
+        </div>
+      </div>
+    );
+  };
+
+  const S = { background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 5, color: T.text, padding: "6px 8px", fontSize: 12, fontFamily: "var(--mono)", width: "100%", boxSizing: "border-box", outline: "none" };
+  const L = { fontSize: 9, letterSpacing: 1, textTransform: "uppercase", color: T.textLight, marginBottom: 3, fontFamily: "var(--mono)" };
+
+  return (
+    <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 10, padding: "14px 16px", display: "flex", flexDirection: "column", gridColumn: "span 2", minWidth: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 6 }}>
+        <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>
+          This Month <span style={{ color: T.textMid, fontWeight: 600, marginLeft: 4, textTransform: "none", letterSpacing: 0 }}>· {now.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</span>
+        </div>
+        {isManager && !editing && (
+          <button onClick={() => setEditing(true)} style={{ background: "transparent", border: `1px solid ${T.borderStrong}`, color: T.teal, fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)", textTransform: "uppercase", padding: "3px 8px", borderRadius: 4 }}>Set Target</button>
+        )}
+      </div>
+
+      {editing ? (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 6 }}>
+            <div><div style={L}>L1 Monthly Tgt</div><input type="number" value={draft.line1} onChange={e => setDraft({ ...draft, line1: e.target.value })} style={S} /></div>
+            <div><div style={L}>L2 Monthly Tgt</div><input type="number" value={draft.line2} onChange={e => setDraft({ ...draft, line2: e.target.value })} style={S} /></div>
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+            <button onClick={() => { setDraft(targets); setEditing(false); }} style={{ padding: "4px 10px", borderRadius: 5, border: `1px solid ${T.borderStrong}`, background: "transparent", color: T.textMid, fontSize: 10, fontFamily: "var(--mono)", textTransform: "uppercase", cursor: "pointer" }}>Cancel</button>
+            <button onClick={saveTargets} style={{ padding: "4px 10px", borderRadius: 5, border: "none", background: T.teal, color: "#fff", fontSize: 10, fontWeight: 700, fontFamily: "var(--mono)", textTransform: "uppercase", cursor: "pointer" }}>Save</button>
+          </div>
+          <div style={{ fontSize: 9, color: T.textFaint, fontStyle: "italic", marginTop: 4, fontFamily: "var(--mono)" }}>Preview: saved locally (browser) until DB-backed monthly targets land.</div>
+        </div>
+      ) : (
+        <>
+          <Bar produced={l1Produced} target={targets.line1} color={T.teal} label="LINE I" />
+          <Bar produced={l2Produced} target={targets.line2} color={T.coral} label="LINE II" />
+          <div style={{ marginTop: 4, paddingTop: 8, borderTop: `1px solid ${T.border}`, fontSize: 11, fontFamily: "var(--mono)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: T.textMid }}>Combined</span>
+              <span style={{ color: T.text, fontWeight: 700 }}>
+                {fmt(totalProduced)}<span style={{ color: T.textMid, fontWeight: 400 }}> / {totalTarget > 0 ? fmt(totalTarget) : "—"}</span>
+                {totalTarget > 0 && <span style={{ color: T.textMid, marginLeft: 6 }}>({((totalProduced / totalTarget) * 100).toFixed(1)}%)</span>}
+              </span>
+            </div>
+            {totalTarget > 0 && (
+              <>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, color: T.textMid }}>
+                  <span>Pace projection</span>
+                  <span style={{ color: T.text }}>
+                    L1 <span style={{ color: T.teal, fontWeight: 600 }}>{fmt(Math.round(projectedL1))}</span> · L2 <span style={{ color: T.coral, fontWeight: 600 }}>{fmt(Math.round(projectedL2))}</span>
+                  </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3, color: T.textMid }}>
+                  <span>Need per day <span style={{ color: T.textFaint }}>({remainingWD}d left)</span></span>
+                  <span style={{ color: T.text }}>
+                    L1 <span style={{ color: T.teal, fontWeight: 600 }}>{remainingWD > 0 ? fmt(Math.round(requiredL1)) : "—"}</span> · L2 <span style={{ color: T.coral, fontWeight: 600 }}>{remainingWD > 0 ? fmt(Math.round(requiredL2)) : "—"}</span>
+                  </span>
+                </div>
+              </>
+            )}
+            {totalTarget === 0 && (
+              <div style={{ marginTop: 4, fontSize: 10, color: T.textFaint, fontStyle: "italic" }}>Set monthly target to see progress, pace, and required rate.</div>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -352,6 +503,101 @@ function FillerCard({ entries, line }) {
   );
 }
 
+function TodayPanel({ data, now, userId, userRole, openComments, commentsRefreshTick, onOpenAddEntry }) {
+  const todayDate = localDateStr(now);
+  const todayEntry = data.find(d => d.date === todayDate) || null;
+  const [l1Start, setL1Start] = useState("");
+  const [l2Start, setL2Start] = useState("");
+  const [saving, setSaving] = useState(null);
+  const [savedMsg, setSavedMsg] = useState(null);
+
+  useEffect(() => {
+    setL1Start(todayEntry?.line1_filler_start || "");
+    setL2Start(todayEntry?.line2_filler_start || "");
+  }, [todayEntry?.date, todayEntry?.line1_filler_start, todayEntry?.line2_filler_start]);
+
+  const canEdit = userRole && userRole !== "viewer";
+  const hasTodayEntry = !!todayEntry;
+
+  const saveStart = async (line, value) => {
+    if (!hasTodayEntry) return;
+    setSaving(line);
+    const col = line === 1 ? "line1_filler_start" : "line2_filler_start";
+    const { error } = await supabase
+      .from("production_entries")
+      .update({ [col]: value || null })
+      .eq("entry_date", todayDate);
+    setSaving(null);
+    if (error) { alert("Save failed: " + error.message); return; }
+    setSavedMsg(`L${line} saved`);
+    setTimeout(() => setSavedMsg(null), 1500);
+  };
+
+  const TimeTile = ({ line, color, value, onChange }) => (
+    <div style={{ flex: 1, minWidth: 0, padding: "12px 14px", background: T.barBg, borderRadius: 8, border: `1px solid ${T.border}` }}>
+      <div style={{ fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", color, fontWeight: 700, fontFamily: "var(--mono)", marginBottom: 6 }}>
+        Line {line === 1 ? "I" : "II"} Start
+      </div>
+      <input
+        type="time"
+        value={value}
+        disabled={!canEdit || !hasTodayEntry}
+        onChange={(e) => { const v = e.target.value; if (line === 1) setL1Start(v); else setL2Start(v); }}
+        onBlur={(e) => { const v = e.target.value; if (v !== (todayEntry?.[`line${line}_filler_start`] || "")) saveStart(line, v); }}
+        style={{
+          background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 6,
+          color: T.text, padding: "8px 10px", fontSize: 16, fontFamily: "var(--mono)",
+          width: "100%", boxSizing: "border-box", outline: "none",
+          cursor: (!canEdit || !hasTodayEntry) ? "not-allowed" : "text", opacity: (!canEdit || !hasTodayEntry) ? 0.6 : 1,
+        }}
+      />
+      <div style={{ fontSize: 10, color: T.textMid, fontFamily: "var(--mono)", marginTop: 4 }}>
+        {value ? `Actual: ${formatTime12(value)}` : "Not set"}
+        {todayEntry?.[`line${line}_filler_target`] && <span> · Tgt {formatTime12(todayEntry[`line${line}_filler_target`])}</span>}
+        {saving === line && <span style={{ color: T.teal }}> · saving…</span>}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>
+          Today <span style={{ color: T.textMid, fontSize: 11, textTransform: "none", fontWeight: 600, marginLeft: 6 }}>· {now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</span>
+        </div>
+        {savedMsg && <span style={{ fontSize: 11, color: T.teal, fontFamily: "var(--mono)" }}>{savedMsg}</span>}
+      </div>
+
+      {!hasTodayEntry && canEdit && (
+        <div style={{ padding: "8px 12px", background: T.tealBg, borderRadius: 6, fontSize: 11, fontFamily: "var(--mono)", color: T.text, marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <span>No entry for today yet. Create one to log start times.</span>
+          <button onClick={() => onOpenAddEntry(todayDate)} style={{ padding: "4px 10px", borderRadius: 5, border: "none", background: T.teal, color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)", textTransform: "uppercase" }}>+ Add Today</button>
+        </div>
+      )}
+
+      {hasTodayEntry && canEdit && (
+        <div style={{ padding: "8px 12px", background: T.barBg, borderRadius: 6, fontSize: 11, fontFamily: "var(--mono)", color: T.textMid, marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <span>
+            Produced so far:
+            <span style={{ color: T.teal, fontWeight: 700, marginLeft: 6 }}>L1 {fmt(todayEntry.line1_produced || 0)}</span>
+            <span style={{ color: T.coral, fontWeight: 700, marginLeft: 8 }}>L2 {fmt(todayEntry.line2_produced || 0)}</span>
+          </span>
+          <button onClick={() => onOpenAddEntry(todayDate)} style={{ padding: "4px 10px", borderRadius: 5, border: "none", background: T.teal, color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)", textTransform: "uppercase" }}>Log Production</button>
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+        <TimeTile line={1} color={T.teal} value={l1Start} />
+        <TimeTile line={2} color={T.coral} value={l2Start} />
+      </div>
+
+      <div style={{ paddingTop: 12, borderTop: `1px solid ${T.border}` }}>
+        <CommentsList date={todayDate} currentUserId={userId} isManager={userRole === "manager"} refreshTick={commentsRefreshTick} onAddClick={() => openComments(todayDate)} compact />
+      </div>
+    </div>
+  );
+}
+
 function WeekComparison({ data, now }) {
   const thisMonday = getMonday(now);
   const lastMonday = new Date(thisMonday); lastMonday.setDate(lastMonday.getDate() - 7);
@@ -413,7 +659,7 @@ function WeekComparison({ data, now }) {
 
 function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
   const yest = new Date(); yest.setDate(yest.getDate() - 1);
-  const [date, setDate] = useState(initialDate || yest.toISOString().split("T")[0]);
+  const [date, setDate] = useState(initialDate || localDateStr(yest));
   const [product, setProduct] = useState("Sunberry");
   const [daily, setDaily] = useState({ line1_produced: "", line1_filler_start: "", line2_produced: "", line2_filler_start: "", notes: "" });
   const [defaults, setDefaults] = useState(null);
@@ -696,12 +942,14 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   const [selectedDate, setSelectedDate] = useState(null);
 
   const sum = (a, k) => a.reduce((s, e) => s + (e[k] || 0), 0);
-  const sorted = [...data].sort((a, b) => b.date.localeCompare(a.date));
+  const todayDateStr = localDateStr(now);
+  const historical = data.filter(d => d.date < todayDateStr);
+  const sorted = [...historical].sort((a, b) => b.date.localeCompare(a.date));
   const latest = sorted[0] || null, previous = sorted[1] || null;
   useEffect(() => {
     if (selectedDate == null && latest) setSelectedDate(latest.date);
   }, [latest, selectedDate]);
-  const selectedEntry = selectedDate ? data.find(d => d.date === selectedDate) : null;
+  const selectedEntry = selectedDate ? historical.find(d => d.date === selectedDate) : null;
   const selTotal = eTotal(selectedEntry), selTarget = eTarget(selectedEntry), selCap = eCap(selectedEntry);
   const latestTotal = eTotal(latest), latestTarget = eTarget(latest), latestCap = eCap(latest), prevTotal = eTotal(previous);
   const last5 = sorted.slice(0, 5), prev5 = sorted.slice(5, 10);
@@ -709,14 +957,24 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   const last5Eff = aggEff(last5), prev5Eff = aggEff(prev5);
   const last5Mixed = uniqueProducts(last5).length > 1 || uniqueProducts(prev5).length > 1;
   const diffSku = latest && previous && latest.product && previous.product && latest.product !== previous.product;
-  const weekEntries = data.filter(d => { const dd = new Date(d.date + "T12:00:00"); return getWeekNumber(dd) === getWeekNumber(now) && dd.getFullYear() === now.getFullYear(); });
-  const monthEntries = data.filter(d => { const dd = new Date(d.date + "T12:00:00"); return dd.getMonth() === now.getMonth() && dd.getFullYear() === now.getFullYear(); });
-  const weekP = sum(weekEntries, "line1_produced") + sum(weekEntries, "line2_produced"), weekT = sum(weekEntries, "line1_target") + sum(weekEntries, "line2_target");
+  const weekEntries = historical.filter(d => { const dd = new Date(d.date + "T12:00:00"); return getWeekNumber(dd) === getWeekNumber(now) && dd.getFullYear() === now.getFullYear(); });
+  const monthEntries = historical.filter(d => { const dd = new Date(d.date + "T12:00:00"); return dd.getMonth() === now.getMonth() && dd.getFullYear() === now.getFullYear(); });
+  const weekP = sum(weekEntries, "line1_produced") + sum(weekEntries, "line2_produced"), weekT = sum(weekEntries, "line1_target") + sum(weekEntries, "line2_target"), weekC = sum(weekEntries, "line1_capacity") + sum(weekEntries, "line2_capacity");
   const monthP = sum(monthEntries, "line1_produced") + sum(monthEntries, "line2_produced"), monthT = sum(monthEntries, "line1_target") + sum(monthEntries, "line2_target"), monthC = sum(monthEntries, "line1_capacity") + sum(monthEntries, "line2_capacity");
   const latestEff = eEff(latest), prevEff = eEff(previous);
   const weekEff = weekT > 0 ? (weekP / weekT) * 100 : null;
+  const weekCap = weekC > 0 ? (weekP / weekC) * 100 : null;
   const monthEff = monthT > 0 ? (monthP / monthT) * 100 : null;
+  const last5P = last5.reduce((s, e) => s + eTotal(e), 0);
+  const last5C = last5.reduce((s, e) => s + eCap(e), 0);
+  const last5Cap = last5C > 0 ? (last5P / last5C) * 100 : null;
+  const prevTarget = previous ? eTarget(previous) : 0;
+  const prevCap_ = previous ? eCap(previous) : 0;
+  const weekRangeLabel = weekEntries.length > 0
+    ? `${formatDate([...weekEntries].sort((a,b)=>a.date.localeCompare(b.date))[0].date)} – ${formatDate([...weekEntries].sort((a,b)=>b.date.localeCompare(a.date))[0].date)}`
+    : "—";
   const recent = sorted.slice(0, 7).reverse();
+  const pendingEntries = historical.filter(e => (e.line1_produced || 0) === 0 && (e.line2_produced || 0) === 0);
 
   if (loading) return <div style={{ minHeight: "100vh", background: T.bg, display: "flex", alignItems: "center", justifyContent: "center" }}><div style={{ fontFamily: "'JetBrains Mono', monospace", color: T.textLight }}>Loading...</div></div>;
 
@@ -762,19 +1020,39 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
 
       {view === "dashboard" ? (
         <div style={{ padding: "18px 22px 80px", position: "relative", zIndex: 1 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10, marginBottom: 18 }}>
+          {pendingEntries.length > 0 && userRole !== "viewer" && (
+            <div style={{ padding: "10px 14px", background: T.goldBg, border: `1px solid ${T.gold}`, borderRadius: 8, marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: T.text }}>
+                <span style={{ fontWeight: 700, color: T.gold, marginRight: 6 }}>⚠ Pending update:</span>
+                {pendingEntries.length === 1
+                  ? `1 day has 0 cases logged (${formatDayShort(pendingEntries[0].date)}). Fill in produced numbers so rollups stay accurate.`
+                  : `${pendingEntries.length} days have 0 cases logged. Fill in produced numbers so rollups stay accurate.`}
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {pendingEntries.slice(0, 4).map(e => (
+                  <button key={e.date} onClick={() => openEntry(e.date)} style={{ padding: "4px 10px", borderRadius: 5, border: `1px solid ${T.gold}`, background: "transparent", color: T.text, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>
+                    Fix {formatDate(e.date)}
+                  </button>
+                ))}
+                {pendingEntries.length > 4 && <span style={{ fontSize: 11, color: T.textMid, fontFamily: "var(--mono)", alignSelf: "center" }}>+{pendingEntries.length - 4} more</span>}
+              </div>
+            </div>
+          )}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 10, marginBottom: 18 }}>
             <StatCard title="Latest" titleDetail={latest ? formatDayShort(latest.date) : ""} value={latest ? fmt(latestTotal) : "—"}
-              sub={latest ? `Tgt: ${fmt(latestTarget)} · Cap: ${fmt(latestCap)}\nTgt hit: ${pc(latestTotal, latestTarget)}% · Cap: ${pc(latestTotal, latestCap)}%` : "No entries yet"}
+              sub={latest ? `Tgt: ${fmt(latestTarget)} · Cap: ${fmt(latestCap)}\nCap hit: ${pc(latestTotal, latestCap)}% · Tgt hit: ${pc(latestTotal, latestTarget)}%` : "No entries yet"}
               accent={perfColor(latestEff)} change={ppDelta(latestEff, prevEff)} changeSuffix="pp vs prev"
               tag={diffSku ? <SkuTag kind="different" /> : null} />
             <StatCard title="Previous" titleDetail={previous ? formatDayShort(previous.date) : ""} value={previous ? fmt(prevTotal) : "—"}
-              sub={previous ? `Tgt hit: ${pc(prevTotal, eTarget(previous))}% · Cap: ${pc(prevTotal, eCap(previous))}%` : "—"} accent={perfColor(prevEff)} />
+              sub={previous ? `Tgt: ${fmt(prevTarget)} · Cap: ${fmt(prevCap_)}\nCap hit: ${pc(prevTotal, prevCap_)}% · Tgt hit: ${pc(prevTotal, prevTarget)}%` : "—"} accent={perfColor(prevEff)} />
             <StatCard title="5-Day Avg" value={fmt(Math.round(avg5))}
-              sub={`${last5.length}d rolling · Tgt hit: ${last5Eff != null ? last5Eff.toFixed(1) + "%" : "—"}`}
+              sub={`${last5.length}d rolling\nCap hit: ${last5Cap != null ? last5Cap.toFixed(1) + "%" : "—"} · Tgt hit: ${last5Eff != null ? last5Eff.toFixed(1) + "%" : "—"}`}
               accent={perfColor(last5Eff)} change={ppDelta(last5Eff, prev5Eff)} changeSuffix="pp vs prev 5"
               tag={last5Mixed ? <SkuTag kind="mixed" /> : null} />
-            <StatCard title="This Week" value={fmt(weekP)} sub={`${weekEntries.length}d · Tgt: ${pc(weekP, weekT)}%`} accent={perfColor(weekEff)} />
-            <StatCard title="This Month" value={fmt(monthP)} sub={`${monthEntries.length}d · Tgt: ${pc(monthP, monthT)}%\nCap: ${pc(monthP, monthC)}%`} accent={perfColor(monthEff)} />
+            <StatCard title="This Week" value={fmt(weekP)}
+              sub={`${weekRangeLabel} · ${weekEntries.length}d\nCap hit: ${pc(weekP, weekC)}% · Tgt hit: ${pc(weekP, weekT)}%`}
+              accent={perfColor(weekEff)} />
+            <MonthlyProgressCard monthEntries={monthEntries} now={now} isManager={userRole === "manager"} />
           </div>
           <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 14, marginTop: -10, marginBottom: 14, fontSize: 10, fontFamily: "var(--mono)", color: T.textMid }}>
             <span style={{ letterSpacing: 1, textTransform: "uppercase" }}>Tgt hit color:</span>
@@ -784,12 +1062,13 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 12, marginBottom: 18 }}>
+            <TodayPanel data={data} now={now} userId={userId} userRole={userRole} openComments={openComments} commentsRefreshTick={commentsRefreshTick} onOpenAddEntry={openEntry} />
             <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16, textAlign: "center" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 10, flexWrap: "wrap" }}>
                 <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>
                   Day View {selectedEntry && <span style={{ color: T.text, fontSize: 11, textTransform: "none", fontWeight: 600 }}>({formatDayShort(selectedEntry.date)} · {selectedEntry.product})</span>}
                 </div>
-                <input type="date" value={selectedDate || ""} max={latest?.date || undefined} onChange={e => setSelectedDate(e.target.value)} style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 5, color: T.text, padding: "5px 9px", fontSize: 12, fontFamily: "var(--mono)", outline: "none", cursor: "pointer" }} />
+                <input type="date" value={selectedDate || ""} max={latest?.date || undefined} onChange={e => { const v = e.target.value; if (v && v < todayDateStr) setSelectedDate(v); }} style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 5, color: T.text, padding: "5px 9px", fontSize: 12, fontFamily: "var(--mono)", outline: "none", cursor: "pointer" }} />
               </div>
               {!selectedEntry && selectedDate && (
                 <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic", padding: "10px 0" }}>No production data for this date.</div>
@@ -806,15 +1085,18 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
                 </div>
               )}
             </div>
-            <WeekComparison data={data} now={now} />
           </div>
 
-          <MonthComparison data={data} />
-          <NotesPanel entries={data} expanded={notesOpen} onToggle={() => setNotesOpen(!notesOpen)} />
+          <div style={{ marginBottom: 18 }}>
+            <WeekComparison data={historical} now={now} />
+          </div>
+
+          <MonthComparison data={historical} />
+          <NotesPanel entries={historical} expanded={notesOpen} onToggle={() => setNotesOpen(!notesOpen)} />
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 12, marginBottom: 18 }}>
-            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16 }}><FillerCard entries={data} line={1} /></div>
-            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16 }}><FillerCard entries={data} line={2} /></div>
+            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16 }}><FillerCard entries={historical} line={1} /></div>
+            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16 }}><FillerCard entries={historical} line={2} /></div>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 12 }}>
@@ -837,11 +1119,15 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
                 ))}
               </tr></thead>
               <tbody>
-                {sorted.map((e, i) => {
-                  const isL = i === 0;
+                {[...data].sort((a, b) => b.date.localeCompare(a.date)).map((e, i, arr) => {
+                  const isToday = e.date === todayDateStr;
+                  const isL = !isToday && e.date === (arr.find(r => r.date !== todayDateStr)?.date);
                   return (
-                    <tr key={e.date} style={{ borderBottom: `1px solid ${T.border}`, background: isL ? T.tealBg : "transparent" }}>
-                      <td style={{ padding: "7px 7px", textAlign: "right", color: isL ? T.teal : T.textMid, fontWeight: isL ? 600 : 400, whiteSpace: "nowrap" }}>{formatDay(e.date)}</td>
+                    <tr key={e.date} style={{ borderBottom: `1px solid ${T.border}`, background: isToday ? T.gaugeInnerBg : isL ? T.tealBg : "transparent" }}>
+                      <td style={{ padding: "7px 7px", textAlign: "right", color: isToday ? T.gold : isL ? T.teal : T.textMid, fontWeight: (isL || isToday) ? 600 : 400, whiteSpace: "nowrap" }}>
+                        {formatDay(e.date)}
+                        {isToday && <span style={{ marginLeft: 6, fontSize: 9, padding: "1px 6px", borderRadius: 3, background: T.gold, color: "#fff", letterSpacing: 0.5, textTransform: "uppercase", fontWeight: 700 }}>In progress</span>}
+                      </td>
                       <td style={{ padding: "7px 7px", textAlign: "right", color: T.textLight }}>{e.product}</td>
                       <td style={{ padding: "7px 7px", textAlign: "right", color: T.teal, fontWeight: 600 }}>{fmt(e.line1_produced)}</td>
                       <td style={{ padding: "7px 7px", textAlign: "right", color: T.textFaint }}>{fmt(e.line1_target)}</td>

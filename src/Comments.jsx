@@ -115,13 +115,24 @@ export function CommentsList({ date, currentUserId, isManager, refreshTick = 0, 
   );
 }
 
+const CATEGORIES = [
+  { value: 'other', label: 'Other' },
+  { value: 'mechanical', label: 'Mechanical' },
+  { value: 'production', label: 'Production' },
+  { value: 'quality', label: 'Quality' },
+  { value: 'staffing', label: 'Staffing' },
+];
+
 export default function CommentsModal({ initialDate, onClose, currentUserId, isManager }) {
   const yest = new Date(); yest.setDate(yest.getDate() - 1);
-  const [date, setDate] = useState(initialDate || yest.toISOString().split('T')[0]);
+  const [date, setDate] = useState(initialDate || (() => { const y = yest.getFullYear(); const m = String(yest.getMonth()+1).padStart(2,'0'); const d = String(yest.getDate()).padStart(2,'0'); return `${y}-${m}-${d}`; })());
   const [comments, setComments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [text, setText] = useState('');
   const [posting, setPosting] = useState(false);
+  const [category, setCategory] = useState('other');
+  const [minutes, setMinutes] = useState('');
+  const [otherSpecify, setOtherSpecify] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -203,6 +214,27 @@ export default function CommentsModal({ initialDate, onClose, currentUserId, isM
             rows={3}
             style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.5, minHeight: 60 }}
           />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+            <div>
+              <div style={labelStyle}>Category</div>
+              <select value={category} onChange={(e) => setCategory(e.target.value)} style={{ ...inputStyle, cursor: 'pointer', padding: '8px 10px' }}>
+                {CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={labelStyle}>Downtime (min) <span style={{ textTransform: 'none', color: T.textFaint, letterSpacing: 0 }}>· optional</span></div>
+              <input type="number" min="0" max="1440" step="1" value={minutes} onChange={(e) => setMinutes(e.target.value)} placeholder="0" style={{ ...inputStyle, padding: '8px 10px' }} />
+            </div>
+          </div>
+          {category === 'other' && (
+            <div style={{ marginTop: 8 }}>
+              <div style={labelStyle}>What kind? <span style={{ textTransform: 'none', color: T.textFaint, letterSpacing: 0 }}>· helps categorize "Other"</span></div>
+              <input type="text" value={otherSpecify} onChange={(e) => setOtherSpecify(e.target.value)} placeholder="e.g. Utility outage, supply delay…" style={{ ...inputStyle, padding: '8px 10px' }} />
+            </div>
+          )}
+          <div style={{ fontSize: 10, color: T.textFaint, fontFamily: "'JetBrains Mono', monospace", marginTop: 6, fontStyle: 'italic' }}>
+            Category & downtime fields are preview only — they will start saving once the comments table migration runs.
+          </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
             <span style={{ fontSize: 10, color: T.textFaint, fontFamily: "'JetBrains Mono', monospace" }}>⌘/Ctrl + Enter to post</span>
             <button
