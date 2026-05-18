@@ -192,23 +192,47 @@ function StatCard({ title, titleDetail, value, sub, accent, change, changeSuffix
 }
 
 function MonthlyProgressCard({ monthEntries, now, isManager }) {
-  const monthKey = `${now.getFullYear()}-${String(now.getMonth()).padStart(2, "0")}`;
-  const storageKey = `monthlyTarget:${monthKey}`;
-  const [targets, setTargets] = useState(() => {
-    try {
-      const raw = localStorage.getItem(storageKey);
-      if (raw) return JSON.parse(raw);
-    } catch {}
-    return { line1: 0, line2: 0 };
-  });
+  const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const [targets, setTargets] = useState({ line1: 0, line2: 0 });
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(targets);
-  useEffect(() => { setDraft(targets); }, [targets]);
+  const [draft, setDraft] = useState({ line1: 0, line2: 0 });
+  const [saving, setSaving] = useState(false);
 
-  const saveTargets = () => {
-    const next = { line1: parseInt(draft.line1) || 0, line2: parseInt(draft.line2) || 0 };
-    setTargets(next);
-    try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch {}
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from("monthly_targets")
+        .select("line1_target, line2_target")
+        .eq("month", monthKey)
+        .maybeSingle();
+      if (cancelled) return;
+      if (error) { console.error("monthly_targets fetch failed", error); return; }
+      const next = { line1: data?.line1_target || 0, line2: data?.line2_target || 0 };
+      setTargets(next);
+      setDraft(next);
+    })();
+    return () => { cancelled = true; };
+  }, [monthKey]);
+
+  const saveTargets = async () => {
+    setSaving(true);
+    const payload = {
+      month: monthKey,
+      line1_target: parseInt(draft.line1) || 0,
+      line2_target: parseInt(draft.line2) || 0,
+    };
+    const { data, error } = await supabase
+      .from("monthly_targets")
+      .upsert(payload, { onConflict: "month" })
+      .select()
+      .single();
+    setSaving(false);
+    if (error || !data) {
+      alert("Could not save monthly target: " + (error?.message || "no row returned"));
+      return;
+    }
+    setTargets({ line1: data.line1_target, line2: data.line2_target });
     setEditing(false);
   };
 
@@ -271,10 +295,9 @@ function MonthlyProgressCard({ monthEntries, now, isManager }) {
             <div><div style={L}>L2 Monthly Tgt</div><input type="number" value={draft.line2} onChange={e => setDraft({ ...draft, line2: e.target.value })} style={S} /></div>
           </div>
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
-            <button onClick={() => { setDraft(targets); setEditing(false); }} style={{ padding: "4px 10px", borderRadius: 5, border: `1px solid ${T.borderStrong}`, background: "transparent", color: T.textMid, fontSize: 10, fontFamily: "var(--mono)", textTransform: "uppercase", cursor: "pointer" }}>Cancel</button>
-            <button onClick={saveTargets} style={{ padding: "4px 10px", borderRadius: 5, border: "none", background: T.teal, color: "#fff", fontSize: 10, fontWeight: 700, fontFamily: "var(--mono)", textTransform: "uppercase", cursor: "pointer" }}>Save</button>
+            <button onClick={() => { setDraft(targets); setEditing(false); }} disabled={saving} style={{ padding: "4px 10px", borderRadius: 5, border: `1px solid ${T.borderStrong}`, background: "transparent", color: T.textMid, fontSize: 10, fontFamily: "var(--mono)", textTransform: "uppercase", cursor: "pointer" }}>Cancel</button>
+            <button onClick={saveTargets} disabled={saving} style={{ padding: "4px 10px", borderRadius: 5, border: "none", background: T.teal, color: "#fff", fontSize: 10, fontWeight: 700, fontFamily: "var(--mono)", textTransform: "uppercase", cursor: saving ? "wait" : "pointer" }}>{saving ? "Saving…" : "Save"}</button>
           </div>
-          <div style={{ fontSize: 9, color: T.textFaint, fontStyle: "italic", marginTop: 4, fontFamily: "var(--mono)" }}>Preview: saved locally (browser) until DB-backed monthly targets land.</div>
         </div>
       ) : (
         <>

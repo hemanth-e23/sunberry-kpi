@@ -32,11 +32,27 @@ function displayName(profile, fallbackEmail) {
 function CommentItem({ comment, currentUserId, isManager, onDelete }) {
   const isOwn = comment.author_id === currentUserId;
   const canDelete = isOwn || isManager;
+  const cat = comment.category;
+  const catLabel = cat ? CATEGORY_LABELS[cat] : null;
+  const catColor = cat ? CATEGORY_COLORS[cat] : null;
+  const mins = comment.downtime_minutes;
   return (
     <div style={{ padding: '10px 0', borderBottom: `1px solid ${T.border}`, textAlign: 'left' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, gap: 6 }}>
-        <span style={{ fontWeight: 700, fontSize: 12, color: T.text, fontFamily: "'JetBrains Mono', monospace" }}>
-          {displayName(comment.author)}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, gap: 6, flexWrap: 'wrap' }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{ fontWeight: 700, fontSize: 12, color: T.text, fontFamily: "'JetBrains Mono', monospace" }}>
+            {displayName(comment.author)}
+          </span>
+          {catLabel && (
+            <span style={{ fontSize: 9, letterSpacing: 0.5, textTransform: 'uppercase', color: '#fff', background: catColor, padding: '2px 6px', borderRadius: 3, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>
+              {catLabel}{cat === 'other' && comment.other_specify ? `: ${comment.other_specify}` : ''}
+            </span>
+          )}
+          {mins != null && mins > 0 && (
+            <span style={{ fontSize: 10, color: T.text, background: 'rgba(217,74,66,0.12)', padding: '2px 6px', borderRadius: 3, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>
+              {mins}m down
+            </span>
+          )}
         </span>
         <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <span title={new Date(comment.created_at).toLocaleString()} style={{ fontSize: 11, color: T.textMid, fontFamily: "'JetBrains Mono', monospace" }}>{timeAgo(comment.created_at)}</span>
@@ -55,12 +71,31 @@ function CommentItem({ comment, currentUserId, isManager, onDelete }) {
 async function fetchCommentsFor(date) {
   const { data, error } = await supabase
     .from('comments')
-    .select('id, text, created_at, author_id, author:profiles!author_id(full_name, email)')
+    .select('id, text, created_at, author_id, category, downtime_minutes, other_specify, author:profiles!author_id(full_name, email)')
     .eq('entry_date', date)
     .order('created_at', { ascending: true });
   if (error) console.error('load comments failed', error);
   return data || [];
 }
+
+export async function fetchCommentsBetween(startDate, endDate) {
+  const { data, error } = await supabase
+    .from('comments')
+    .select('id, entry_date, category, downtime_minutes, other_specify')
+    .gte('entry_date', startDate)
+    .lte('entry_date', endDate);
+  if (error) console.error('load comments range failed', error);
+  return data || [];
+}
+
+const CATEGORY_LABELS = {
+  mechanical: 'Mechanical', production: 'Production',
+  quality: 'Quality', staffing: 'Staffing', other: 'Other',
+};
+const CATEGORY_COLORS = {
+  mechanical: '#D94A42', production: '#0E9990',
+  quality: '#C99700', staffing: '#7A5BD9', other: 'rgba(44,36,22,0.5)',
+};
 
 async function deleteComment(id) {
   const { error } = await supabase.from('comments').delete().eq('id', id);
@@ -146,14 +181,21 @@ export default function CommentsModal({ initialDate, onClose, currentUserId, isM
     const trimmed = text.trim();
     if (!trimmed) return;
     setPosting(true);
-    const { error } = await supabase.from('comments').insert({
+    const payload = {
       entry_date: date,
       author_id: currentUserId,
       text: trimmed,
-    });
+      category,
+      downtime_minutes: minutes === '' ? null : Math.min(parseInt(minutes) || 0, 1440),
+      other_specify: category === 'other' && otherSpecify.trim() ? otherSpecify.trim() : null,
+    };
+    const { error } = await supabase.from('comments').insert(payload);
     setPosting(false);
     if (error) { alert('Could not post: ' + error.message); return; }
     setText('');
+    setMinutes('');
+    setOtherSpecify('');
+    setCategory('other');
     await load();
   };
 
@@ -232,9 +274,6 @@ export default function CommentsModal({ initialDate, onClose, currentUserId, isM
               <input type="text" value={otherSpecify} onChange={(e) => setOtherSpecify(e.target.value)} placeholder="e.g. Utility outage, supply delay…" style={{ ...inputStyle, padding: '8px 10px' }} />
             </div>
           )}
-          <div style={{ fontSize: 10, color: T.textFaint, fontFamily: "'JetBrains Mono', monospace", marginTop: 6, fontStyle: 'italic' }}>
-            Category & downtime fields are preview only — they will start saving once the comments table migration runs.
-          </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
             <span style={{ fontSize: 10, color: T.textFaint, fontFamily: "'JetBrains Mono', monospace" }}>⌘/Ctrl + Enter to post</span>
             <button
