@@ -29,6 +29,15 @@ function displayName(profile, fallbackEmail) {
   return email.split('@')[0];
 }
 
+const CATEGORY_LABELS = {
+  mechanical: 'Mechanical', production: 'Production',
+  quality: 'Quality', staffing: 'Staffing', other: 'Other',
+};
+const CATEGORY_COLORS = {
+  mechanical: '#D94A42', production: '#0E9990',
+  quality: '#C99700', staffing: '#7A5BD9', other: 'rgba(44,36,22,0.5)',
+};
+
 function CommentItem({ comment, currentUserId, isManager, onDelete }) {
   const isOwn = comment.author_id === currentUserId;
   const canDelete = isOwn || isManager;
@@ -87,15 +96,6 @@ export async function fetchCommentsBetween(startDate, endDate) {
   if (error) console.error('load comments range failed', error);
   return data || [];
 }
-
-const CATEGORY_LABELS = {
-  mechanical: 'Mechanical', production: 'Production',
-  quality: 'Quality', staffing: 'Staffing', other: 'Other',
-};
-const CATEGORY_COLORS = {
-  mechanical: '#D94A42', production: '#0E9990',
-  quality: '#C99700', staffing: '#7A5BD9', other: 'rgba(44,36,22,0.5)',
-};
 
 async function deleteComment(id) {
   const { error } = await supabase.from('comments').delete().eq('id', id);
