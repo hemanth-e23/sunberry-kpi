@@ -601,7 +601,13 @@ function TodayPanel({ data, now, userId, userRole, openComments, commentsRefresh
         <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>
           Today <span style={{ color: T.textMid, fontSize: 11, textTransform: "none", fontWeight: 600, marginLeft: 6 }}>· {now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</span>
         </div>
-        {savedMsg && <span style={{ fontSize: 11, color: T.teal, fontFamily: "var(--mono)" }}>{savedMsg}</span>}
+        {savedMsg
+          ? <span style={{ fontSize: 11, color: T.teal, fontFamily: "var(--mono)" }}>{savedMsg}</span>
+          : todayEntry?.last_synced_at && (
+            <span style={{ fontSize: 10, color: T.textFaint, fontFamily: "var(--mono)" }} title={`Last synced ${new Date(todayEntry.last_synced_at).toLocaleString()}`}>
+              synced {new Date(todayEntry.last_synced_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
+            </span>
+          )}
       </div>
 
       {!hasTodayEntry && canEdit && (
