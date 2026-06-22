@@ -604,7 +604,7 @@ function TodayPanel({ data, now, userId, userRole, openComments, commentsRefresh
         {savedMsg
           ? <span style={{ fontSize: 11, color: T.teal, fontFamily: "var(--mono)" }}>{savedMsg}</span>
           : todayEntry?.last_synced_at && (
-            <span style={{ fontSize: 10, color: T.textFaint, fontFamily: "var(--mono)" }} title={`Last synced ${new Date(todayEntry.last_synced_at).toLocaleString()}`}>
+            <span style={{ fontSize: 10, color: "#000", fontFamily: "var(--mono)" }} title={`Last synced ${new Date(todayEntry.last_synced_at).toLocaleString()}`}>
               synced {new Date(todayEntry.last_synced_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
             </span>
           )}
