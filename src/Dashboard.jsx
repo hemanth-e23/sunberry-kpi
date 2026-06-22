@@ -1146,29 +1146,8 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
               </div>
             </div>
           )}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 10, marginBottom: 18 }}>
-            <StatCard title="Latest" titleDetail={latest ? formatDayShort(latest.date) : ""} value={latest ? fmt(latestTotal) : "—"}
-              sub={latest ? `Tgt: ${fmt(latestTarget)} · Cap: ${fmt(latestCap)}\nCap hit: ${pc(latestTotal, latestCap)}% · Tgt hit: ${pc(latestTotal, latestTarget)}%` : "No entries yet"}
-              accent={perfColor(latestEff)} change={ppDelta(latestEff, prevEff)} changeSuffix="pp vs prev"
-              tag={diffSku ? <SkuTag kind="different" /> : null} />
-            <StatCard title="Previous" titleDetail={previous ? formatDayShort(previous.date) : ""} value={previous ? fmt(prevTotal) : "—"}
-              sub={previous ? `Tgt: ${fmt(prevTarget)} · Cap: ${fmt(prevCap_)}\nCap hit: ${pc(prevTotal, prevCap_)}% · Tgt hit: ${pc(prevTotal, prevTarget)}%` : "—"} accent={perfColor(prevEff)} />
-            <StatCard title="5-Day Avg" value={fmt(Math.round(avg5))}
-              sub={`${last5.length}d rolling\nCap hit: ${last5Cap != null ? last5Cap.toFixed(1) + "%" : "—"} · Tgt hit: ${last5Eff != null ? last5Eff.toFixed(1) + "%" : "—"}`}
-              accent={perfColor(last5Eff)} change={ppDelta(last5Eff, prev5Eff)} changeSuffix="pp vs prev 5"
-              tag={last5Mixed ? <SkuTag kind="mixed" /> : null} />
-            <StatCard title="This Week" value={fmt(weekP)}
-              sub={`${weekRangeLabel} · ${weekEntries.length}d\nCap hit: ${pc(weekP, weekC)}% · Tgt hit: ${pc(weekP, weekT)}%`}
-              accent={perfColor(weekEff)} />
-            <MonthlyProgressCard monthEntries={monthEntries} now={now} isManager={userRole === "manager"} />
-          </div>
-          <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 14, marginTop: -10, marginBottom: 14, fontSize: 10, fontFamily: "var(--mono)", color: T.textMid }}>
-            <span style={{ letterSpacing: 1, textTransform: "uppercase" }}>Tgt hit color:</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 9, height: 9, background: T.teal, borderRadius: "50%" }} /> ≥ 90% on track</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 9, height: 9, background: T.gold, borderRadius: "50%" }} /> 75–89% watch</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 9, height: 9, background: T.coral, borderRadius: "50%" }} /> {"<"} 75% behind</span>
-          </div>
 
+          {/* Today is the focus on open — keep it at the top */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 12, marginBottom: 18 }}>
             <TodayPanel data={data} now={now} userId={userId} userRole={userRole} openComments={openComments} commentsRefreshTick={commentsRefreshTick} onOpenAddEntry={openEntry} />
             <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16, textAlign: "center" }}>
@@ -1193,6 +1172,29 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
                 </div>
               )}
             </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 10, marginBottom: 18 }}>
+            <StatCard title="Latest" titleDetail={latest ? formatDayShort(latest.date) : ""} value={latest ? fmt(latestTotal) : "—"}
+              sub={latest ? `Tgt: ${fmt(latestTarget)} · Cap: ${fmt(latestCap)}\nCap hit: ${pc(latestTotal, latestCap)}% · Tgt hit: ${pc(latestTotal, latestTarget)}%` : "No entries yet"}
+              accent={perfColor(latestEff)} change={ppDelta(latestEff, prevEff)} changeSuffix="pp vs prev"
+              tag={diffSku ? <SkuTag kind="different" /> : null} />
+            <StatCard title="Previous" titleDetail={previous ? formatDayShort(previous.date) : ""} value={previous ? fmt(prevTotal) : "—"}
+              sub={previous ? `Tgt: ${fmt(prevTarget)} · Cap: ${fmt(prevCap_)}\nCap hit: ${pc(prevTotal, prevCap_)}% · Tgt hit: ${pc(prevTotal, prevTarget)}%` : "—"} accent={perfColor(prevEff)} />
+            <StatCard title="5-Day Avg" value={fmt(Math.round(avg5))}
+              sub={`${last5.length}d rolling\nCap hit: ${last5Cap != null ? last5Cap.toFixed(1) + "%" : "—"} · Tgt hit: ${last5Eff != null ? last5Eff.toFixed(1) + "%" : "—"}`}
+              accent={perfColor(last5Eff)} change={ppDelta(last5Eff, prev5Eff)} changeSuffix="pp vs prev 5"
+              tag={last5Mixed ? <SkuTag kind="mixed" /> : null} />
+            <StatCard title="This Week" value={fmt(weekP)}
+              sub={`${weekRangeLabel} · ${weekEntries.length}d\nCap hit: ${pc(weekP, weekC)}% · Tgt hit: ${pc(weekP, weekT)}%`}
+              accent={perfColor(weekEff)} />
+            <MonthlyProgressCard monthEntries={monthEntries} now={now} isManager={userRole === "manager"} />
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 14, marginTop: -10, marginBottom: 14, fontSize: 10, fontFamily: "var(--mono)", color: T.textMid }}>
+            <span style={{ letterSpacing: 1, textTransform: "uppercase" }}>Tgt hit color:</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 9, height: 9, background: T.teal, borderRadius: "50%" }} /> ≥ 90% on track</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 9, height: 9, background: T.gold, borderRadius: "50%" }} /> 75–89% watch</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 9, height: 9, background: T.coral, borderRadius: "50%" }} /> {"<"} 75% behind</span>
           </div>
 
           <div style={{ marginBottom: 18 }}>
