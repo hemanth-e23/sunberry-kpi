@@ -1051,9 +1051,10 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   const sorted = [...historical].sort((a, b) => b.date.localeCompare(a.date));
   const latest = sorted[0] || null, previous = sorted[1] || null;
   useEffect(() => {
-    if (selectedDate == null && latest) setSelectedDate(latest.date);
-  }, [latest, selectedDate]);
-  const selectedEntry = selectedDate ? historical.find(d => d.date === selectedDate) : null;
+    if (selectedDate == null) setSelectedDate(todayDateStr);
+  }, [selectedDate, todayDateStr]);
+  // resolve from full data (incl. today) so Day View can show the live day
+  const selectedEntry = selectedDate ? data.find(d => d.date === selectedDate) : null;
   const selTotal = eTotal(selectedEntry), selTarget = eTarget(selectedEntry), selCap = eCap(selectedEntry);
   const latestTotal = eTotal(latest), latestTarget = eTarget(latest), latestCap = eCap(latest), prevTotal = eTotal(previous);
   const last5 = sorted.slice(0, 5), prev5 = sorted.slice(5, 10);
@@ -1175,7 +1176,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
                 <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>
                   Day View {selectedEntry && <span style={{ color: T.text, fontSize: 11, textTransform: "none", fontWeight: 600 }}>({formatDayShort(selectedEntry.date)} · {selectedEntry.product})</span>}
                 </div>
-                <input type="date" value={selectedDate || ""} max={latest?.date || undefined} onChange={e => { const v = e.target.value; if (v && v < todayDateStr) setSelectedDate(v); }} style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 5, color: T.text, padding: "5px 9px", fontSize: 12, fontFamily: "var(--mono)", outline: "none", cursor: "pointer" }} />
+                <input type="date" value={selectedDate || ""} max={todayDateStr} onChange={e => { const v = e.target.value; if (v && v <= todayDateStr) setSelectedDate(v); }} style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 5, color: T.text, padding: "5px 9px", fontSize: 12, fontFamily: "var(--mono)", outline: "none", cursor: "pointer" }} />
               </div>
               {!selectedEntry && selectedDate && (
                 <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic", padding: "10px 0" }}>No production data for this date.</div>
