@@ -612,13 +612,25 @@ function TodayPanel({ data, now, userId, userRole, openComments, commentsRefresh
       )}
 
       {hasTodayEntry && canEdit && (
-        <div style={{ padding: "8px 12px", background: T.barBg, borderRadius: 6, fontSize: 11, fontFamily: "var(--mono)", color: T.textMid, marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-          <span>
-            Produced so far:
-            <span style={{ color: T.teal, fontWeight: 700, marginLeft: 6 }}>L1 {fmt(todayEntry.line1_produced || 0)}</span>
-            <span style={{ color: T.coral, fontWeight: 700, marginLeft: 8 }}>L2 {fmt(todayEntry.line2_produced || 0)}</span>
-          </span>
-          <button onClick={() => onOpenAddEntry(todayDate)} style={{ padding: "4px 10px", borderRadius: 5, border: "none", background: T.teal, color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)", textTransform: "uppercase" }}>Log Production</button>
+        <div style={{ padding: "14px 16px", background: T.barBg, borderRadius: 8, marginBottom: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
+            <span style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", color: T.textLight, fontFamily: "var(--mono)" }}>Produced so far</span>
+            <button onClick={() => onOpenAddEntry(todayDate)} style={{ padding: "4px 10px", borderRadius: 5, border: "none", background: T.teal, color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)", textTransform: "uppercase" }}>Log Production</button>
+          </div>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 22, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: T.teal, fontFamily: "var(--mono)" }}>L1</span>
+              <span style={{ fontSize: 36, fontWeight: 800, color: T.teal, fontFamily: "var(--mono)", lineHeight: 1, letterSpacing: -1 }}>{fmt(todayEntry.line1_produced || 0)}</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: T.coral, fontFamily: "var(--mono)" }}>L2</span>
+              <span style={{ fontSize: 36, fontWeight: 800, color: T.coral, fontFamily: "var(--mono)", lineHeight: 1, letterSpacing: -1 }}>{fmt(todayEntry.line2_produced || 0)}</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginLeft: "auto" }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: T.textMid, fontFamily: "var(--mono)" }}>TOTAL</span>
+              <span style={{ fontSize: 36, fontWeight: 800, color: T.text, fontFamily: "var(--mono)", lineHeight: 1, letterSpacing: -1 }}>{fmt((todayEntry.line1_produced || 0) + (todayEntry.line2_produced || 0))}</span>
+            </div>
+          </div>
         </div>
       )}
 
