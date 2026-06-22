@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./lib/supabase";
 import CommentsModal, { CommentsList } from "./Comments.jsx";
 
-const DEFAULT_FILLER_TARGET = "07:00";
+const DEFAULT_FILLER_TARGET = "05:30";
 
 const trimTime = (t) => (t ? t.slice(0, 5) : null);
 
@@ -724,10 +724,10 @@ function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
       setExistingSpecs({
         line1_target: e.line1_target,
         line1_capacity: e.line1_capacity,
-        line1_filler_target: e.line1_filler_target || "07:00",
+        line1_filler_target: e.line1_filler_target || DEFAULT_FILLER_TARGET,
         line2_target: e.line2_target,
         line2_capacity: e.line2_capacity,
-        line2_filler_target: e.line2_filler_target || "07:00",
+        line2_filler_target: e.line2_filler_target || DEFAULT_FILLER_TARGET,
       });
       setSynced({
         line1_produced: e.line1_produced_synced ?? null,
@@ -755,10 +755,10 @@ function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
       setDefaults({
         line1_target: data.line1_target,
         line1_capacity: data.line1_capacity,
-        line1_filler_target: trimTime(data.line1_filler_target) || "07:00",
+        line1_filler_target: trimTime(data.line1_filler_target) || DEFAULT_FILLER_TARGET,
         line2_target: data.line2_target,
         line2_capacity: data.line2_capacity,
-        line2_filler_target: trimTime(data.line2_filler_target) || "07:00",
+        line2_filler_target: trimTime(data.line2_filler_target) || DEFAULT_FILLER_TARGET,
       });
     })();
     return () => { cancelled = true; };
@@ -803,10 +803,10 @@ function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
     setDefaults({
       line1_target: saved.line1_target,
       line1_capacity: saved.line1_capacity,
-      line1_filler_target: trimTime(saved.line1_filler_target) || "07:00",
+      line1_filler_target: trimTime(saved.line1_filler_target) || DEFAULT_FILLER_TARGET,
       line2_target: saved.line2_target,
       line2_capacity: saved.line2_capacity,
-      line2_filler_target: trimTime(saved.line2_filler_target) || "07:00",
+      line2_filler_target: trimTime(saved.line2_filler_target) || DEFAULT_FILLER_TARGET,
     });
     setEditingDefaults(false);
     setDraftDefaults(null);
@@ -817,10 +817,10 @@ function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
     setExistingSpecs({
       line1_target: parseInt(draftDefaults.line1_target) || 0,
       line1_capacity: parseInt(draftDefaults.line1_capacity) || 0,
-      line1_filler_target: draftDefaults.line1_filler_target || "07:00",
+      line1_filler_target: draftDefaults.line1_filler_target || DEFAULT_FILLER_TARGET,
       line2_target: parseInt(draftDefaults.line2_target) || 0,
       line2_capacity: parseInt(draftDefaults.line2_capacity) || 0,
-      line2_filler_target: draftDefaults.line2_filler_target || "07:00",
+      line2_filler_target: draftDefaults.line2_filler_target || DEFAULT_FILLER_TARGET,
     });
     setEditingDefaults(false);
     setDraftDefaults(null);
