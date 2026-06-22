@@ -21,6 +21,14 @@ function rowToEntry(r) {
     line2_filler_start: trimTime(r.line2_filler_start),
     line2_filler_target: trimTime(r.line2_filler_target),
     notes: r.notes,
+    // live-sync provenance
+    line1_produced_synced: r.line1_produced_synced,
+    line2_produced_synced: r.line2_produced_synced,
+    line1_produced_manual: r.line1_produced_manual,
+    line2_produced_manual: r.line2_produced_manual,
+    line1_filler_start_synced: trimTime(r.line1_filler_start_synced),
+    line2_filler_start_synced: trimTime(r.line2_filler_start_synced),
+    last_synced_at: r.last_synced_at,
   };
 }
 
@@ -39,6 +47,11 @@ function entryToRow(e) {
     line2_filler_start: e.line2_filler_start || null,
     line2_filler_target: e.line2_filler_target || null,
     notes: e.notes || null,
+    // who owns each field: a hand-saved value wins over the live sync
+    line1_produced_manual: e.line1_produced_manual,
+    line2_produced_manual: e.line2_produced_manual,
+    line1_filler_start_manual: e.line1_filler_start_manual,
+    line2_filler_start_manual: e.line2_filler_start_manual,
   };
 }
 
@@ -687,6 +700,8 @@ function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
   const [daily, setDaily] = useState({ line1_produced: "", line1_filler_start: "", line2_produced: "", line2_filler_start: "", notes: "" });
   const [defaults, setDefaults] = useState(null);
   const [existingSpecs, setExistingSpecs] = useState(null);
+  // last values the live sync wrote for the selected day (null = never synced)
+  const [synced, setSynced] = useState({ line1_produced: null, line2_produced: null, line1_filler_start: null, line2_filler_start: null });
   const [editingDefaults, setEditingDefaults] = useState(false);
   const [draftDefaults, setDraftDefaults] = useState(null);
   const [savingDefaults, setSavingDefaults] = useState(false);
@@ -714,9 +729,16 @@ function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
         line2_capacity: e.line2_capacity,
         line2_filler_target: e.line2_filler_target || "07:00",
       });
+      setSynced({
+        line1_produced: e.line1_produced_synced ?? null,
+        line2_produced: e.line2_produced_synced ?? null,
+        line1_filler_start: e.line1_filler_start_synced ?? null,
+        line2_filler_start: e.line2_filler_start_synced ?? null,
+      });
     } else {
       setDaily({ line1_produced: "", line1_filler_start: "", line2_produced: "", line2_filler_start: "", notes: "" });
       setExistingSpecs(null);
+      setSynced({ line1_produced: null, line2_produced: null, line1_filler_start: null, line2_filler_start: null });
     }
   }, [date]);
 
@@ -806,20 +828,44 @@ function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
 
   const handleSave = () => {
     if (!activeSpecs) { alert("Defaults not loaded yet — try again in a moment."); return; }
+
+    // A produced/start value the user typed that differs from the last synced
+    // value is a manual override → it wins over future syncs. A blank field, or
+    // one matching the synced value ("use live"), stays on auto.
+    const resolveProduced = (n) => {
+      const str = daily[`line${n}_produced`];
+      const num = str === "" ? 0 : (parseInt(str) || 0);
+      const syncedVal = synced[`line${n}_produced`];
+      const manual = str !== "" && (syncedVal == null || num !== syncedVal);
+      return { value: manual ? num : (syncedVal ?? num), manual };
+    };
+    const resolveStart = (n) => {
+      const str = daily[`line${n}_filler_start`];
+      const syncedVal = synced[`line${n}_filler_start`];
+      const manual = str !== "" && (syncedVal == null || str !== syncedVal);
+      return { value: manual ? str : (syncedVal ?? (str || null)), manual };
+    };
+    const p1 = resolveProduced(1), p2 = resolveProduced(2);
+    const s1 = resolveStart(1), s2 = resolveStart(2);
+
     onSave({
       date,
       product,
-      line1_produced: parseInt(daily.line1_produced) || 0,
+      line1_produced: p1.value,
       line1_target: activeSpecs.line1_target,
       line1_capacity: activeSpecs.line1_capacity,
-      line1_filler_start: daily.line1_filler_start,
+      line1_filler_start: s1.value,
       line1_filler_target: activeSpecs.line1_filler_target,
-      line2_produced: parseInt(daily.line2_produced) || 0,
+      line2_produced: p2.value,
       line2_target: activeSpecs.line2_target,
       line2_capacity: activeSpecs.line2_capacity,
-      line2_filler_start: daily.line2_filler_start,
+      line2_filler_start: s2.value,
       line2_filler_target: activeSpecs.line2_filler_target,
       notes: daily.notes.trim(),
+      line1_produced_manual: p1.manual,
+      line2_produced_manual: p2.manual,
+      line1_filler_start_manual: s1.manual,
+      line2_filler_start_manual: s2.manual,
     });
   };
 
@@ -904,8 +950,32 @@ function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
           <div key={n} style={{ padding: "12px 0", borderTop: `1px solid ${T.border}` }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: c, marginBottom: 10, fontFamily: "var(--mono)" }}>{l}</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <div><div style={L}>Produced</div><input type="number" placeholder="0" value={daily[`line${n}_produced`]} onChange={e => updateDaily(`line${n}_produced`, e.target.value)} style={S} /></div>
-              <div><div style={L}>Filler Actual Start</div><input type="time" value={daily[`line${n}_filler_start`]} onChange={e => updateDaily(`line${n}_filler_start`, e.target.value)} style={S} /></div>
+              <div>
+                <div style={L}>Produced</div>
+                <input type="number" placeholder="0" value={daily[`line${n}_produced`]} onChange={e => updateDaily(`line${n}_produced`, e.target.value)} style={S} />
+                {synced[`line${n}_produced`] != null && (
+                  <div style={{ fontSize: 10, color: T.textMid, fontFamily: "var(--mono)", marginTop: 3 }}>
+                    live: {fmt(synced[`line${n}_produced`])}
+                    {String(synced[`line${n}_produced`]) !== String(daily[`line${n}_produced`]) && (
+                      <button type="button" onClick={() => updateDaily(`line${n}_produced`, String(synced[`line${n}_produced`]))}
+                        style={{ marginLeft: 6, background: "none", border: "none", color: T.teal, cursor: "pointer", fontFamily: "var(--mono)", fontSize: 10, padding: 0, textDecoration: "underline" }}>use live</button>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div>
+                <div style={L}>Filler Actual Start</div>
+                <input type="time" value={daily[`line${n}_filler_start`]} onChange={e => updateDaily(`line${n}_filler_start`, e.target.value)} style={S} />
+                {synced[`line${n}_filler_start`] != null && (
+                  <div style={{ fontSize: 10, color: T.textMid, fontFamily: "var(--mono)", marginTop: 3 }}>
+                    live: {synced[`line${n}_filler_start`]}
+                    {synced[`line${n}_filler_start`] !== daily[`line${n}_filler_start`] && (
+                      <button type="button" onClick={() => updateDaily(`line${n}_filler_start`, synced[`line${n}_filler_start`])}
+                        style={{ marginLeft: 6, background: "none", border: "none", color: T.teal, cursor: "pointer", fontFamily: "var(--mono)", fontSize: 10, padding: 0, textDecoration: "underline" }}>use live</button>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         ))}
@@ -928,6 +998,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   const [now, setNow] = useState(new Date());
   const [view, setView] = useState("dashboard");
   const [notesOpen, setNotesOpen] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t); }, []);
 
@@ -942,6 +1013,16 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   }, []);
   useEffect(() => { loadData(); }, [loadData]);
   useEffect(() => { const t = setInterval(loadData, 30000); return () => clearInterval(t); }, [loadData]);
+
+  // Pull today's live numbers on demand. The Edge Function holds the API token
+  // server-side and writes via apply_production_sync (manual values are kept).
+  const syncNow = useCallback(async () => {
+    setSyncing(true);
+    const { data: result, error } = await supabase.functions.invoke("sync-production", { body: {} });
+    setSyncing(false);
+    if (error || result?.error) { alert("Sync failed: " + (error?.message || result?.error)); return; }
+    await loadData();
+  }, [loadData]);
 
   const saveEntry = async (entry) => {
     const { error } = await supabase
@@ -1021,6 +1102,9 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
             {["dashboard", "history"].map(v => (
               <button key={v} onClick={() => setView(v)} style={{ padding: "7px 12px", borderRadius: 6, border: `1px solid ${T.borderStrong}`, background: view === v ? T.barBg : "transparent", color: T.text, fontSize: 12, cursor: "pointer", fontFamily: "var(--mono)", textTransform: "uppercase" }}>{v === "dashboard" ? "Dash" : "Log"}</button>
             ))}
+            {userRole !== "viewer" && (
+              <button onClick={syncNow} disabled={syncing} title="Pull today's live numbers from the scanner" style={{ padding: "7px 12px", borderRadius: 6, border: `1px solid ${T.borderStrong}`, background: "transparent", color: T.text, fontSize: 12, fontWeight: 700, cursor: syncing ? "wait" : "pointer", fontFamily: "var(--mono)", opacity: syncing ? 0.6 : 1 }}>{syncing ? "⟳ Syncing…" : "⟳ Sync"}</button>
+            )}
             {userRole !== "viewer" && (
               <button onClick={() => openEntry(null)} style={{ padding: "7px 12px", borderRadius: 6, border: "none", background: T.teal, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>+ ADD</button>
             )}
