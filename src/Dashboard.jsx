@@ -67,6 +67,18 @@ function localDateStr(d) {
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
+
+// Production day runs 05:30 → 05:30 (matches the inventory/scanner production
+// day the synced numbers are filed under). Before 05:30 local, "today" is still
+// the previous calendar date, so overnight the UI and the counted numbers agree.
+const PRODUCTION_DAY_START_MIN = 5 * 60 + 30; // 05:30
+function productionDateStr(d) {
+  const base = new Date(d);
+  if (base.getHours() * 60 + base.getMinutes() < PRODUCTION_DAY_START_MIN) {
+    base.setDate(base.getDate() - 1);
+  }
+  return localDateStr(base);
+}
 function workingDaysInMonth(year, month) {
   const last = new Date(year, month + 1, 0).getDate();
   let count = 0;
@@ -540,7 +552,7 @@ function FillerCard({ entries, line }) {
 }
 
 function TodayPanel({ data, now, userId, userRole, openComments, commentsRefreshTick, onOpenAddEntry }) {
-  const todayDate = localDateStr(now);
+  const todayDate = productionDateStr(now);
   const todayEntry = data.find(d => d.date === todayDate) || null;
   const [l1Start, setL1Start] = useState("");
   const [l2Start, setL2Start] = useState("");
@@ -1064,7 +1076,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   const [selectedDate, setSelectedDate] = useState(null);
 
   const sum = (a, k) => a.reduce((s, e) => s + (e[k] || 0), 0);
-  const todayDateStr = localDateStr(now);
+  const todayDateStr = productionDateStr(now);
   const historical = data.filter(d => d.date < todayDateStr);
   const sorted = [...historical].sort((a, b) => b.date.localeCompare(a.date));
   const latest = sorted[0] || null, previous = sorted[1] || null;
