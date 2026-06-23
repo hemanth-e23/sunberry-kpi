@@ -79,6 +79,18 @@ function productionDateStr(d) {
   }
   return localDateStr(base);
 }
+
+// Effective defaults for a given production date: the latest production_targets
+// row whose effective_from is on/before that date. `targets` ascending by date.
+// This is what makes target changes apply from today forward without disturbing
+// past days — each day resolves to whatever was in effect then.
+function effectiveTargets(dateStr, targets) {
+  let chosen = null;
+  for (const t of targets || []) {
+    if (t.effective_from <= dateStr) chosen = t; else break;
+  }
+  return chosen;
+}
 function workingDaysInMonth(year, month) {
   const last = new Date(year, month + 1, 0).getDate();
   let count = 0;
@@ -1021,6 +1033,80 @@ function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
   );
 }
 
+function TargetsModal({ onClose, onSaved, current, effectiveDate }) {
+  const [f, setF] = useState({
+    line1_target: current?.line1_target ?? "",
+    line1_capacity: current?.line1_capacity ?? "",
+    line2_target: current?.line2_target ?? "",
+    line2_capacity: current?.line2_capacity ?? "",
+    filler_start_target: current?.filler_start_target ? String(current.filler_start_target).slice(0, 5) : "",
+  });
+  const [saving, setSaving] = useState(false);
+  const upd = (k, v) => setF((p) => ({ ...p, [k]: v }));
+
+  const save = async () => {
+    setSaving(true);
+    const num = (v) => (v === "" ? null : parseInt(v) || 0);
+    const row = {
+      effective_from: effectiveDate,
+      line1_target: num(f.line1_target),
+      line1_capacity: num(f.line1_capacity),
+      line2_target: num(f.line2_target),
+      line2_capacity: num(f.line2_capacity),
+      filler_start_target: f.filler_start_target || null,
+    };
+    const { error } = await supabase.from("production_targets").upsert(row, { onConflict: "effective_from" });
+    // keep the Log Production form's prefill in sync (best effort)
+    await supabase.from("product_defaults").upsert({
+      product: "Sunberry",
+      line1_target: row.line1_target, line1_capacity: row.line1_capacity, line1_filler_target: row.filler_start_target,
+      line2_target: row.line2_target, line2_capacity: row.line2_capacity, line2_filler_target: row.filler_start_target,
+    }, { onConflict: "product" });
+    setSaving(false);
+    if (error) { alert("Save failed: " + error.message); return; }
+    onSaved();
+    onClose();
+  };
+
+  const S = { background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 6, color: T.text, padding: "10px 12px", fontSize: 14, fontFamily: "var(--mono)", width: "100%", boxSizing: "border-box", outline: "none" };
+  const L = { fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", color: T.textLight, marginBottom: 4, fontFamily: "var(--mono)" };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: T.modalOverlay, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(10px)" }}>
+      <div style={{ background: T.modalBg, border: `1px solid ${T.borderStrong}`, borderRadius: 16, padding: 28, width: "92%", maxWidth: 520, maxHeight: "92vh", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.15)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: T.text, fontFamily: "var(--body)" }}>⚙ Default Targets</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: T.textLight, fontSize: 28, cursor: "pointer" }}>×</button>
+        </div>
+        <div style={{ fontSize: 11, color: T.textMid, fontFamily: "var(--mono)", marginBottom: 18, lineHeight: 1.5 }}>
+          Applies from <b>{effectiveDate}</b> forward. Past days keep their values; a per-day edit still overrides for that day.
+        </div>
+
+        <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 12, marginBottom: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: T.teal, marginBottom: 10, fontFamily: "var(--mono)" }}>LINE I</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <div><div style={L}>Target</div><input type="number" value={f.line1_target} onChange={(e) => upd("line1_target", e.target.value)} style={S} /></div>
+            <div><div style={L}>Capacity</div><input type="number" value={f.line1_capacity} onChange={(e) => upd("line1_capacity", e.target.value)} style={S} /></div>
+          </div>
+        </div>
+        <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 12, marginBottom: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: T.coral, marginBottom: 10, fontFamily: "var(--mono)" }}>LINE II</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <div><div style={L}>Target</div><input type="number" value={f.line2_target} onChange={(e) => upd("line2_target", e.target.value)} style={S} /></div>
+            <div><div style={L}>Capacity</div><input type="number" value={f.line2_capacity} onChange={(e) => upd("line2_capacity", e.target.value)} style={S} /></div>
+          </div>
+        </div>
+        <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 12 }}>
+          <div style={L}>Filler Start Target (both lines)</div>
+          <input type="time" value={f.filler_start_target} onChange={(e) => upd("filler_start_target", e.target.value)} style={{ ...S, maxWidth: 160 }} />
+        </div>
+
+        <button onClick={save} disabled={saving} style={{ marginTop: 18, width: "100%", padding: "13px", background: `linear-gradient(135deg, ${T.teal}, #0C8C87)`, border: "none", borderRadius: 8, color: "#fff", fontSize: 13, fontWeight: 700, cursor: saving ? "wait" : "pointer", fontFamily: "var(--mono)", letterSpacing: 1, textTransform: "uppercase" }}>{saving ? "Saving…" : "Save (effective today)"}</button>
+      </div>
+    </div>
+  );
+}
+
 export default function ProductionDashboard({ signOut, userId, userEmail, userRole }) {
   const [data, setData] = useState([]);
   const [showEntry, setShowEntry] = useState(false);
@@ -1029,16 +1115,37 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   const [view, setView] = useState("dashboard");
   const [notesOpen, setNotesOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [targets, setTargets] = useState([]);
+  const [targetsOpen, setTargetsOpen] = useState(false);
 
   useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t); }, []);
 
   const loadData = useCallback(async () => {
-    const { data: rows, error } = await supabase
-      .from("production_entries")
-      .select("*")
-      .order("entry_date", { ascending: false });
-    if (error) console.error("load entries failed", error);
-    else setData((rows || []).map(rowToEntry));
+    const [entriesRes, targetsRes] = await Promise.all([
+      supabase.from("production_entries").select("*").order("entry_date", { ascending: false }),
+      supabase.from("production_targets").select("*").order("effective_from", { ascending: true }),
+    ]);
+    if (entriesRes.error) console.error("load entries failed", entriesRes.error);
+    if (targetsRes.error) console.error("load targets failed", targetsRes.error);
+    const tgts = targetsRes.data || [];
+    setTargets(tgts);
+    if (!entriesRes.error) {
+      setData((entriesRes.data || []).map(rowToEntry).map((e) => {
+        // Fill target/cap/filler-target from the effective default for that day,
+        // but only where the row has no value (a per-day override wins).
+        const d = effectiveTargets(e.date, tgts);
+        if (!d) return e;
+        return {
+          ...e,
+          line1_target: e.line1_target ?? d.line1_target,
+          line1_capacity: e.line1_capacity ?? d.line1_capacity,
+          line2_target: e.line2_target ?? d.line2_target,
+          line2_capacity: e.line2_capacity ?? d.line2_capacity,
+          line1_filler_target: e.line1_filler_target ?? trimTime(d.filler_start_target),
+          line2_filler_target: e.line2_filler_target ?? trimTime(d.filler_start_target),
+        };
+      }));
+    }
     setLoading(false);
   }, []);
   useEffect(() => { loadData(); }, [loadData]);
@@ -1137,6 +1244,9 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
               <button onClick={syncNow} disabled={syncing} title="Pull today's live numbers from the scanner" style={{ padding: "7px 12px", borderRadius: 6, border: `1px solid ${T.borderStrong}`, background: "transparent", color: T.text, fontSize: 12, fontWeight: 700, cursor: syncing ? "wait" : "pointer", fontFamily: "var(--mono)", opacity: syncing ? 0.6 : 1 }}>{syncing ? "⟳ Syncing…" : "⟳ Sync"}</button>
             )}
             {userRole !== "viewer" && (
+              <button onClick={() => setTargetsOpen(true)} title="Set default targets, caps and filler start (effective from today)" style={{ padding: "7px 12px", borderRadius: 6, border: `1px solid ${T.borderStrong}`, background: "transparent", color: T.text, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>⚙ Targets</button>
+            )}
+            {userRole !== "viewer" && (
               <button onClick={() => openEntry(null)} style={{ padding: "7px 12px", borderRadius: 6, border: "none", background: T.teal, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>+ ADD</button>
             )}
             <button onClick={() => openComments(null)} title="Add or view comments" style={{ padding: "7px 12px", borderRadius: 6, border: `1px solid ${T.borderStrong}`, background: "transparent", color: T.text, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>💬 Comment</button>
@@ -1155,6 +1265,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
 
       {showEntry && <DataEntry onSave={saveEntry} onClose={closeEntry} existingData={data} userRole={userRole} initialDate={editDate} />}
       {commentsOpen && <CommentsModal onClose={closeComments} initialDate={commentsDate} currentUserId={userId} isManager={userRole === "manager"} />}
+      {targetsOpen && <TargetsModal onClose={() => setTargetsOpen(false)} onSaved={loadData} current={effectiveTargets(productionDateStr(now), targets)} effectiveDate={productionDateStr(now)} />}
 
       {view === "dashboard" ? (
         <div style={{ padding: "18px 22px 80px", position: "relative", zIndex: 1 }}>
