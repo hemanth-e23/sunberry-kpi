@@ -1133,14 +1133,18 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
       setData((entriesRes.data || []).map(rowToEntry).map((e) => {
         // Fill target/cap/filler-target from the effective default for that day,
         // but only where the row has no value (a per-day override wins).
+        // Use || not ??: synced rows arrive with target/capacity = 0 (not null),
+        // and a 0 target is never meaningful — treat it as "unset" so the
+        // effective default fills in. Otherwise today's synced row keeps 0 and
+        // the gauges read as 100% (produced / 0-clamped-to-1).
         const d = effectiveTargets(e.date, tgts);
         if (!d) return e;
         return {
           ...e,
-          line1_target: e.line1_target ?? d.line1_target,
-          line1_capacity: e.line1_capacity ?? d.line1_capacity,
-          line2_target: e.line2_target ?? d.line2_target,
-          line2_capacity: e.line2_capacity ?? d.line2_capacity,
+          line1_target: e.line1_target || d.line1_target,
+          line1_capacity: e.line1_capacity || d.line1_capacity,
+          line2_target: e.line2_target || d.line2_target,
+          line2_capacity: e.line2_capacity || d.line2_capacity,
           line1_filler_target: e.line1_filler_target ?? trimTime(d.filler_start_target),
           line2_filler_target: e.line2_filler_target ?? trimTime(d.filler_start_target),
         };
@@ -1302,9 +1306,9 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
                 <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic", padding: "10px 0" }}>No production data for this date.</div>
               )}
               <div style={{ display: "flex", justifyContent: "center", gap: 16, flexWrap: "wrap" }}>
-                <DualGauge produced={selectedEntry?.line1_produced || 0} target={selectedEntry?.line1_target || 1} capacity={selectedEntry?.line1_capacity || 1} label="Line I" colorA={T.teal} />
-                <DualGauge produced={selectedEntry?.line2_produced || 0} target={selectedEntry?.line2_target || 1} capacity={selectedEntry?.line2_capacity || 1} label="Line II" colorA={T.coral} />
-                <DualGauge produced={selTotal} target={selTarget || 1} capacity={selCap || 1} label="Combined" colorA={T.gold} />
+                <DualGauge produced={selectedEntry?.line1_produced || 0} target={selectedEntry?.line1_target || 0} capacity={selectedEntry?.line1_capacity || 0} label="Line I" colorA={T.teal} />
+                <DualGauge produced={selectedEntry?.line2_produced || 0} target={selectedEntry?.line2_target || 0} capacity={selectedEntry?.line2_capacity || 0} label="Line II" colorA={T.coral} />
+                <DualGauge produced={selTotal} target={selTarget || 0} capacity={selCap || 0} label="Combined" colorA={T.gold} />
               </div>
               {selectedEntry?.notes && <div style={{ marginTop: 10, padding: "7px 12px", background: T.tealBg, borderRadius: 6, fontSize: 11, color: T.textMid, fontStyle: "italic", textAlign: "left" }}>💬 {selectedEntry.notes}</div>}
               {selectedDate && (
