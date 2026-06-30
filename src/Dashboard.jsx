@@ -91,6 +91,10 @@ function effectiveTargets(dateStr, targets) {
   }
   return chosen;
 }
+function isWeekendStr(dateStr) {
+  const dow = new Date(dateStr + "T12:00:00").getDay();
+  return dow === 0 || dow === 6;
+}
 function workingDaysInMonth(year, month) {
   const last = new Date(year, month + 1, 0).getDate();
   let count = 0;
@@ -282,7 +286,9 @@ function MonthlyProgressCard({ monthEntries, now, isManager }) {
   const totalWD = workingDaysInMonth(now.getFullYear(), now.getMonth());
   const remainingWD = workingDaysRemaining(now.getFullYear(), now.getMonth(), today + 1);
   const elapsedWD = Math.max(totalWD - remainingWD, 1);
-  const daysWithData = monthEntries.length;
+  // Only days that actually ran feed the daily average — weekend/holiday rows
+  // logged as 0 would otherwise drag the pace projection down.
+  const daysWithData = monthEntries.filter(e => (e.line1_produced || 0) + (e.line2_produced || 0) > 0).length;
 
   const dailyL1 = daysWithData > 0 ? l1Produced / daysWithData : 0;
   const dailyL2 = daysWithData > 0 ? l2Produced / daysWithData : 0;
@@ -1117,16 +1123,21 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   const [syncing, setSyncing] = useState(false);
   const [targets, setTargets] = useState([]);
   const [targetsOpen, setTargetsOpen] = useState(false);
+  const [offDays, setOffDays] = useState(() => new Set());
 
   useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t); }, []);
 
   const loadData = useCallback(async () => {
-    const [entriesRes, targetsRes] = await Promise.all([
+    const [entriesRes, targetsRes, offRes] = await Promise.all([
       supabase.from("production_entries").select("*").order("entry_date", { ascending: false }),
       supabase.from("production_targets").select("*").order("effective_from", { ascending: true }),
+      supabase.from("non_working_days").select("entry_date"),
     ]);
     if (entriesRes.error) console.error("load entries failed", entriesRes.error);
     if (targetsRes.error) console.error("load targets failed", targetsRes.error);
+    // Soft-fail: if the table doesn't exist yet, weekends are still auto-skipped.
+    if (offRes.error) console.error("load non_working_days failed", offRes.error);
+    else setOffDays(new Set((offRes.data || []).map(r => r.entry_date)));
     const tgts = targetsRes.data || [];
     setTargets(tgts);
     if (!entriesRes.error) {
@@ -1174,6 +1185,17 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
     closeEntry();
   };
 
+  // Flag a date as a non-working day (holiday/shutdown). It then drops off the
+  // pending reminder. Weekends are skipped automatically and need no marking.
+  const markDayOff = async (date) => {
+    setOffDays(prev => new Set(prev).add(date)); // optimistic
+    const { error } = await supabase
+      .from("non_working_days")
+      .upsert({ entry_date: date }, { onConflict: "entry_date" });
+    if (error) { alert("Could not mark day off: " + error.message); await loadData(); return; }
+    await loadData();
+  };
+
   const [editDate, setEditDate] = useState(null);
   const openEntry = (date) => { setEditDate(date || null); setShowEntry(true); };
   const closeEntry = () => { setEditDate(null); setShowEntry(false); };
@@ -1190,7 +1212,11 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   const todayDateStr = productionDateStr(now);
   const historical = data.filter(d => d.date < todayDateStr);
   const sorted = [...historical].sort((a, b) => b.date.localeCompare(a.date));
-  const latest = sorted[0] || null, previous = sorted[1] || null;
+  // Comparisons walk over days the plant actually ran — an off day (weekend /
+  // holiday, logged as 0) is skipped, so e.g. Monday compares against Friday,
+  // not Sunday's 0.
+  const ranDays = sorted.filter(e => eTotal(e) > 0);
+  const latest = ranDays[0] || null, previous = ranDays[1] || null;
   useEffect(() => {
     if (selectedDate == null) setSelectedDate(todayDateStr);
   }, [selectedDate, todayDateStr]);
@@ -1198,7 +1224,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   const selectedEntry = selectedDate ? data.find(d => d.date === selectedDate) : null;
   const selTotal = eTotal(selectedEntry), selTarget = eTarget(selectedEntry), selCap = eCap(selectedEntry);
   const latestTotal = eTotal(latest), latestTarget = eTarget(latest), latestCap = eCap(latest), prevTotal = eTotal(previous);
-  const last5 = sorted.slice(0, 5), prev5 = sorted.slice(5, 10);
+  const last5 = ranDays.slice(0, 5), prev5 = ranDays.slice(5, 10);
   const avg5 = last5.length > 0 ? last5.reduce((s, e) => s + eTotal(e), 0) / last5.length : 0;
   const last5Eff = aggEff(last5), prev5Eff = aggEff(prev5);
   const last5Mixed = uniqueProducts(last5).length > 1 || uniqueProducts(prev5).length > 1;
@@ -1220,7 +1246,11 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
     ? `${formatDate([...weekEntries].sort((a,b)=>a.date.localeCompare(b.date))[0].date)} – ${formatDate([...weekEntries].sort((a,b)=>b.date.localeCompare(a.date))[0].date)}`
     : "—";
   const recent = sorted.slice(0, 7).reverse();
-  const pendingEntries = historical.filter(e => (e.line1_produced || 0) === 0 && (e.line2_produced || 0) === 0);
+  // Nag only for weekdays that aren't marked off — we don't run weekends or
+  // holidays, so a 0 there is expected, not a missing log.
+  const pendingEntries = historical.filter(e =>
+    (e.line1_produced || 0) === 0 && (e.line2_produced || 0) === 0 &&
+    !isWeekendStr(e.date) && !offDays.has(e.date));
 
   if (loading) return <div style={{ minHeight: "100vh", background: T.bg, display: "flex", alignItems: "center", justifyContent: "center" }}><div style={{ fontFamily: "'JetBrains Mono', monospace", color: T.textLight }}>Loading...</div></div>;
 
@@ -1281,11 +1311,16 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
                   ? `1 day has 0 cases logged (${formatDayShort(pendingEntries[0].date)}). Fill in produced numbers so rollups stay accurate.`
                   : `${pendingEntries.length} days have 0 cases logged. Fill in produced numbers so rollups stay accurate.`}
               </div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 {pendingEntries.slice(0, 4).map(e => (
-                  <button key={e.date} onClick={() => openEntry(e.date)} style={{ padding: "4px 10px", borderRadius: 5, border: `1px solid ${T.gold}`, background: "transparent", color: T.text, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>
-                    Fix {formatDate(e.date)}
-                  </button>
+                  <span key={e.date} style={{ display: "inline-flex", alignItems: "center", gap: 0, border: `1px solid ${T.gold}`, borderRadius: 5, overflow: "hidden" }}>
+                    <button onClick={() => openEntry(e.date)} style={{ padding: "4px 10px", border: "none", background: "transparent", color: T.text, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>
+                      Fix {formatDate(e.date)}
+                    </button>
+                    <button onClick={() => markDayOff(e.date)} title="Mark as a non-working day (public holiday / shutdown) — stops the reminder and skips it in comparisons" style={{ padding: "4px 9px", border: "none", borderLeft: `1px solid ${T.gold}`, background: "transparent", color: T.textMid, fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "var(--mono)" }}>
+                      Day off
+                    </button>
+                  </span>
                 ))}
                 {pendingEntries.length > 4 && <span style={{ fontSize: 11, color: T.textMid, fontFamily: "var(--mono)", alignSelf: "center" }}>+{pendingEntries.length - 4} more</span>}
               </div>
