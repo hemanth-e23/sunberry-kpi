@@ -741,7 +741,7 @@ function WeekComparison({ data, now }) {
   );
 }
 
-function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
+function DataEntry({ onSave, onClose, existingData, userRole, initialDate, offDays, onSetDayOff }) {
   const yest = new Date(); yest.setDate(yest.getDate() - 1);
   const [date, setDate] = useState(initialDate || localDateStr(yest));
   const [product, setProduct] = useState("Sunberry");
@@ -942,6 +942,18 @@ function DataEntry({ onSave, onClose, existingData, userRole, initialDate }) {
             {isEditing && <div style={{ fontSize: 11, color: T.textFaint, marginTop: 3 }}>Locked — entry already saved with this product</div>}
           </div>
         </div>
+
+        {userRole !== "viewer" && onSetDayOff && (
+          <label style={{ display: "flex", alignItems: "center", gap: 9, padding: "10px 12px", borderRadius: 8, background: T.barBg, marginBottom: 14, cursor: "pointer", fontFamily: "var(--mono)" }}>
+            <input type="checkbox" checked={!!(offDays && offDays.has(date))} onChange={e => onSetDayOff(date, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: T.gold }} />
+            <span style={{ fontSize: 12, color: T.text }}>
+              Non-working day <span style={{ color: T.textMid }}>(public holiday / no production)</span>
+              <span style={{ display: "block", fontSize: 10, color: T.textFaint, marginTop: 2 }}>
+                {isWeekendStr(date) ? "Weekends are skipped automatically — no need to mark." : "Stops the pending reminder and skips this day in comparisons."}
+              </span>
+            </span>
+          </label>
+        )}
 
         <div style={{ padding: "12px 14px", borderRadius: 8, background: T.barBg, marginBottom: 14 }}>
           {editingDefaults ? (
@@ -1185,14 +1197,15 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
     closeEntry();
   };
 
-  // Flag a date as a non-working day (holiday/shutdown). It then drops off the
-  // pending reminder. Weekends are skipped automatically and need no marking.
-  const markDayOff = async (date) => {
-    setOffDays(prev => new Set(prev).add(date)); // optimistic
-    const { error } = await supabase
-      .from("non_working_days")
-      .upsert({ entry_date: date }, { onConflict: "entry_date" });
-    if (error) { alert("Could not mark day off: " + error.message); await loadData(); return; }
+  // Flag/unflag a date as a non-working day (holiday/shutdown). Off days drop
+  // off the pending reminder and are skipped in comparisons. Weekends are
+  // handled automatically and need no marking.
+  const setDayOff = async (date, value) => {
+    setOffDays(prev => { const n = new Set(prev); value ? n.add(date) : n.delete(date); return n; }); // optimistic
+    const { error } = value
+      ? await supabase.from("non_working_days").upsert({ entry_date: date }, { onConflict: "entry_date" })
+      : await supabase.from("non_working_days").delete().eq("entry_date", date);
+    if (error) alert("Could not update day-off: " + error.message);
     await loadData();
   };
 
@@ -1297,7 +1310,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
         </div>
       </div>
 
-      {showEntry && <DataEntry onSave={saveEntry} onClose={closeEntry} existingData={data} userRole={userRole} initialDate={editDate} />}
+      {showEntry && <DataEntry onSave={saveEntry} onClose={closeEntry} existingData={data} userRole={userRole} initialDate={editDate} offDays={offDays} onSetDayOff={setDayOff} />}
       {commentsOpen && <CommentsModal onClose={closeComments} initialDate={commentsDate} currentUserId={userId} isManager={userRole === "manager"} />}
       {targetsOpen && <TargetsModal onClose={() => setTargetsOpen(false)} onSaved={loadData} current={effectiveTargets(productionDateStr(now), targets)} effectiveDate={productionDateStr(now)} />}
 
@@ -1317,7 +1330,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
                     <button onClick={() => openEntry(e.date)} style={{ padding: "4px 10px", border: "none", background: "transparent", color: T.text, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>
                       Fix {formatDate(e.date)}
                     </button>
-                    <button onClick={() => markDayOff(e.date)} title="Mark as a non-working day (public holiday / shutdown) — stops the reminder and skips it in comparisons" style={{ padding: "4px 9px", border: "none", borderLeft: `1px solid ${T.gold}`, background: "transparent", color: T.textMid, fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "var(--mono)" }}>
+                    <button onClick={() => setDayOff(e.date, true)} title="Mark as a non-working day (public holiday / shutdown) — stops the reminder and skips it in comparisons" style={{ padding: "4px 9px", border: "none", borderLeft: `1px solid ${T.gold}`, background: "transparent", color: T.textMid, fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "var(--mono)" }}>
                       Day off
                     </button>
                   </span>
