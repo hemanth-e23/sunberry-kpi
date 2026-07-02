@@ -142,22 +142,25 @@ function isWeekendStr(dateStr) {
   const dow = new Date(dateStr + "T12:00:00").getDay();
   return dow === 0 || dow === 6;
 }
-function workingDaysInMonth(year, month) {
+// Working days = weekdays that aren't marked off (public holiday / shutdown),
+// so a plant closure on a Mon–Fri drops out of the month projection and the
+// required-per-day rate.
+function isWorkingDay(year, month, day, offDays) {
+  const d = new Date(year, month, day);
+  const dow = d.getDay();
+  if (dow === 0 || dow === 6) return false;
+  return !(offDays && offDays.has(localDateStr(d)));
+}
+function workingDaysInMonth(year, month, offDays) {
   const last = new Date(year, month + 1, 0).getDate();
   let count = 0;
-  for (let day = 1; day <= last; day++) {
-    const dow = new Date(year, month, day).getDay();
-    if (dow !== 0 && dow !== 6) count++;
-  }
+  for (let day = 1; day <= last; day++) if (isWorkingDay(year, month, day, offDays)) count++;
   return count;
 }
-function workingDaysRemaining(year, month, fromDay) {
+function workingDaysRemaining(year, month, fromDay, offDays) {
   const last = new Date(year, month + 1, 0).getDate();
   let count = 0;
-  for (let day = fromDay; day <= last; day++) {
-    const dow = new Date(year, month, day).getDay();
-    if (dow !== 0 && dow !== 6) count++;
-  }
+  for (let day = fromDay; day <= last; day++) if (isWorkingDay(year, month, day, offDays)) count++;
   return count;
 }
 function getMonday(d) {
@@ -268,7 +271,7 @@ function StatCard({ title, titleDetail, value, sub, accent, change, changeSuffix
   );
 }
 
-function MonthlyProgressCard({ monthEntries, now, isManager }) {
+function MonthlyProgressCard({ monthEntries, now, isManager, offDays }) {
   const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
   const [targets, setTargets] = useState({ line1: 0, line2: 0 });
   const [editing, setEditing] = useState(false);
@@ -319,8 +322,8 @@ function MonthlyProgressCard({ monthEntries, now, isManager }) {
   const totalTarget = (targets.line1 || 0) + (targets.line2 || 0);
 
   const today = now.getDate();
-  const totalWD = workingDaysInMonth(now.getFullYear(), now.getMonth());
-  const remainingWD = workingDaysRemaining(now.getFullYear(), now.getMonth(), today + 1);
+  const totalWD = workingDaysInMonth(now.getFullYear(), now.getMonth(), offDays);
+  const remainingWD = workingDaysRemaining(now.getFullYear(), now.getMonth(), today + 1, offDays);
   const elapsedWD = Math.max(totalWD - remainingWD, 1);
   // Only days that actually ran feed the daily average — weekend/holiday rows
   // logged as 0 would otherwise drag the pace projection down.
@@ -1496,7 +1499,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
                 </div>
               ))}
             </div>
-            <MonthlyProgressCard monthEntries={monthEntries} now={now} isManager={userRole === "manager"} />
+            <MonthlyProgressCard monthEntries={monthEntries} now={now} isManager={userRole === "manager"} offDays={offDays} />
           </div>
           <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 14, marginTop: -10, marginBottom: 14, fontSize: 10, fontFamily: "var(--mono)", color: T.textMid }}>
             <span style={{ letterSpacing: 1, textTransform: "uppercase" }}>Tgt hit color:</span>
