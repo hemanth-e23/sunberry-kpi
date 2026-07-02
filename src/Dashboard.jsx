@@ -80,6 +80,53 @@ function productionDateStr(d) {
   return localDateStr(base);
 }
 
+// The day's target is meant to be hit over a 20-hour run. Pace = fraction of
+// that window elapsed since the filler start. A completed past day returns 1
+// (full target expected); the live day returns elapsed-so-far / 20h.
+const PACE_WINDOW_MIN = 20 * 60;
+function paceFraction(dateStr, startTime, now) {
+  if (!dateStr) return 1;
+  const start = new Date(`${dateStr}T${startTime || "05:30"}:00`);
+  const total = PACE_WINDOW_MIN * 60000;
+  const todayProd = productionDateStr(now);
+  if (dateStr < todayProd) return 1; // completed day → whole window elapsed
+  if (dateStr > todayProd) return 0; // future — shouldn't happen
+  return Math.max(0, Math.min(1, (now - start) / total));
+}
+// Cases you should have produced by now if evenly paced across the 20h window.
+function expectedByNow(dateStr, startTime, target, now) {
+  return target > 0 ? target * paceFraction(dateStr, startTime, now) : 0;
+}
+
+// All pace figures for one day: per-line + combined efficiency (produced vs.
+// the CAPACITY you should have reached by now over the 20h run) and bottle
+// throughput (per hr / per min). Expected is anchored to the last sync so it
+// doesn't outrun a frozen produced count; a completed past day uses the full
+// 20h window (efficiency = produced / capacity = the gauge's CAP number).
+function paceStats(entry, dateStr, now) {
+  const p1 = entry?.line1_produced || 0, p2 = entry?.line2_produced || 0;
+  const c1 = entry?.line1_capacity || 0, c2 = entry?.line2_capacity || 0;
+  const rawSync = entry?.last_synced_at ? new Date(entry.last_synced_at) : null;
+  const refTime = (rawSync && productionDateStr(rawSync) === dateStr) ? rawSync : now;
+  const frac1 = paceFraction(dateStr, entry?.line1_filler_start, refTime);
+  const frac2 = paceFraction(dateStr, entry?.line2_filler_start, refTime);
+  const exp1 = c1 * frac1, exp2 = c2 * frac2;
+  const min1 = frac1 * PACE_WINDOW_MIN, min2 = frac2 * PACE_WINDOW_MIN;
+  const rMin1 = min1 > 0 ? p1 / min1 : null, rMin2 = min2 > 0 ? p2 / min2 : null;
+  const pTot = p1 + p2, expTot = exp1 + exp2;
+  const rMinTot = (rMin1 || 0) + (rMin2 || 0) || null;
+  return {
+    c1, c2, p1, p2, pTot, expTot,
+    eff1: exp1 > 0 ? (p1 / exp1) * 100 : null,
+    eff2: exp2 > 0 ? (p2 / exp2) * 100 : null,
+    effTot: expTot > 0 ? (pTot / expTot) * 100 : null,
+    rMin1, rMin2, rMinTot,
+    rHr1: rMin1 != null ? rMin1 * 60 : null,
+    rHr2: rMin2 != null ? rMin2 * 60 : null,
+    rHrTot: rMinTot != null ? rMinTot * 60 : null,
+  };
+}
+
 // Effective defaults for a given production date: the latest production_targets
 // row whose effective_from is on/before that date. `targets` ascending by date.
 // This is what makes target changes apply from today forward without disturbing
@@ -177,35 +224,24 @@ function SkuTag({ kind }) {
   );
 }
 
-function DualGauge({ produced, target, capacity, label, colorA, size = 115 }) {
-  const tPct = target > 0 ? Math.min(produced / target, 1) : 0;
-  const cPct = capacity > 0 ? Math.min(produced / capacity, 1) : 0;
-  const r1 = (size - 16) / 2, r2 = r1 - 14, circ1 = Math.PI * r1, circ2 = Math.PI * r2, cy = size / 2 + 4;
-  const innerStroke = "rgba(44,36,22,0.55)";
+// Efficiency gauge: arc + headline show pace efficiency (produced vs. the
+// capacity you should have reached by now over 20h), with the live bottle rate
+// (/hr · /min) beneath. One number per line — no duplicate CAP/TGT readouts.
+function DualGauge({ eff, rHr, rMin, label, colorA, size = 115 }) {
+  const arc = eff == null ? 0 : Math.min(Math.max(eff, 0) / 100, 1);
+  const r1 = (size - 16) / 2, circ1 = Math.PI * r1, cy = size / 2 + 4;
   return (
     <div style={{ textAlign: "center" }}>
       <svg width={size} height={size / 2 + 24} viewBox={`0 0 ${size} ${size / 2 + 24}`}>
-        <path d={`M 8,${cy} A ${r1},${r1} 0 0 1 ${size - 8},${cy}`} fill="none" stroke={T.gaugeBg} strokeWidth="8" strokeLinecap="round" />
-        <path d={`M 8,${cy} A ${r1},${r1} 0 0 1 ${size - 8},${cy}`} fill="none" stroke={colorA} strokeWidth="8" strokeLinecap="round"
-          strokeDasharray={circ1} strokeDashoffset={circ1 - cPct * circ1} style={{ transition: "stroke-dashoffset 1.2s ease" }} />
-        <path d={`M ${8 + 14},${cy} A ${r2},${r2} 0 0 1 ${size - 8 - 14},${cy}`} fill="none" stroke={T.gaugeInnerBg} strokeWidth="6" strokeLinecap="round" />
-        <path d={`M ${8 + 14},${cy} A ${r2},${r2} 0 0 1 ${size - 8 - 14},${cy}`} fill="none" stroke={innerStroke} strokeWidth="6" strokeLinecap="round"
-          strokeDasharray={circ2} strokeDashoffset={circ2 - tPct * circ2} style={{ transition: "stroke-dashoffset 1.2s ease" }} />
-        <text x={size / 2} y={cy - 6} textAnchor="middle" fill={T.text} fontSize="22" fontWeight="700" fontFamily="var(--mono)">{(cPct * 100).toFixed(1)}%</text>
+        <path d={`M 8,${cy} A ${r1},${r1} 0 0 1 ${size - 8},${cy}`} fill="none" stroke={T.gaugeBg} strokeWidth="9" strokeLinecap="round" />
+        <path d={`M 8,${cy} A ${r1},${r1} 0 0 1 ${size - 8},${cy}`} fill="none" stroke={colorA} strokeWidth="9" strokeLinecap="round"
+          strokeDasharray={circ1} strokeDashoffset={circ1 - arc * circ1} style={{ transition: "stroke-dashoffset 1.2s ease" }} />
+        <text x={size / 2} y={cy - 3} textAnchor="middle" fill={perfColor(eff)} fontSize="27" fontWeight="800" fontFamily="var(--mono)">{eff == null ? "—" : Math.round(eff) + "%"}</text>
       </svg>
-      <div style={{ display: "flex", justifyContent: "center", gap: 12, fontFamily: "var(--mono)", marginTop: -2 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-          <span style={{ display: "inline-block", width: 10, height: 3, background: colorA, borderRadius: 2 }} />
-          <span style={{ fontSize: 11, color: T.text, fontWeight: 700 }}>{(cPct * 100).toFixed(1)}%</span>
-          <span style={{ fontSize: 9, color: T.textMid, letterSpacing: 1, textTransform: "uppercase" }}>cap</span>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-          <span style={{ display: "inline-block", width: 10, height: 3, background: innerStroke, borderRadius: 2 }} />
-          <span style={{ fontSize: 11, color: T.text, fontWeight: 700 }}>{(tPct * 100).toFixed(1)}%</span>
-          <span style={{ fontSize: 9, color: T.textMid, letterSpacing: 1, textTransform: "uppercase" }}>tgt</span>
-        </div>
+      <div style={{ fontSize: 13, color: "#000", fontFamily: "var(--mono)", fontWeight: 700, marginTop: 0 }}>
+        {rHr == null ? "—" : `${fmt(Math.round(rHr))}/hr · ${rMin.toFixed(1)}/min`}
       </div>
-      <div style={{ fontSize: 12, color: T.text, marginTop: 6, letterSpacing: 1.5, textTransform: "uppercase", fontFamily: "var(--mono)", fontWeight: 700 }}>{label}</div>
+      <div style={{ fontSize: 13, color: T.text, marginTop: 7, letterSpacing: 1.5, textTransform: "uppercase", fontFamily: "var(--mono)", fontWeight: 700 }}>{label}</div>
     </div>
   );
 }
@@ -530,7 +566,7 @@ function MonthComparison({ data }) {
 }
 
 function FillerCard({ entries, line }) {
-  const recent = [...entries].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+  const recent = [...entries].sort((a, b) => b.date.localeCompare(a.date));
   const startKey = line === 1 ? "line1_filler_start" : "line2_filler_start";
   const targetKey = line === 1 ? "line1_filler_target" : "line2_filler_target";
   return (
@@ -560,7 +596,7 @@ function FillerCard({ entries, line }) {
         const avg = diffs.reduce((s, d) => s + d, 0) / diffs.length;
         return (
           <div style={{ marginTop: 8, padding: "6px 10px", background: T.barBg, borderRadius: 6, fontSize: 12, fontFamily: "var(--mono)", color: T.textLight, display: "flex", justifyContent: "space-between" }}>
-            <span>5-day avg</span>
+            <span>{diffs.length}-day avg</span>
             <span style={{ color: avg > 0 ? T.coral : T.teal, fontWeight: 600 }}>{formatMinDiff(Math.round(avg))}</span>
           </div>
         );
@@ -1125,6 +1161,29 @@ function TargetsModal({ onClose, onSaved, current, effectiveDate }) {
   );
 }
 
+// Section header with day-range presets + a from→to calendar picker. Reused by
+// the Daily Breakdown and Filler Start sections, each with its own range state.
+function RangePicker({ title, count, rangeStart, rangeEnd, setRangeStart, setRangeEnd, yestStr, applyPreset }) {
+  const inputStyle = { background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 5, color: T.text, padding: "5px 8px", fontSize: 11, fontFamily: "var(--mono)", outline: "none", cursor: "pointer" };
+  const presetStart = (n) => { const s = new Date(yestStr + "T12:00:00"); s.setDate(s.getDate() - (n - 1)); return localDateStr(s); };
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
+      <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>
+        {title} <span style={{ color: T.textMid, fontWeight: 600 }}>· {count}d</span>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", fontFamily: "var(--mono)" }}>
+        {[7, 10, 14, 30].map(n => {
+          const active = rangeEnd === yestStr && rangeStart === presetStart(n);
+          return <button key={n} onClick={() => applyPreset(n)} style={{ padding: "4px 9px", borderRadius: 5, border: `1px solid ${T.borderStrong}`, background: active ? T.barBg : "transparent", color: T.text, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>{n}d</button>;
+        })}
+        <input type="date" value={rangeStart} max={rangeEnd || yestStr} onChange={e => { const v = e.target.value; if (v && (!rangeEnd || v <= rangeEnd)) setRangeStart(v); }} style={inputStyle} />
+        <span style={{ fontSize: 12, color: T.textFaint }}>→</span>
+        <input type="date" value={rangeEnd} min={rangeStart} max={yestStr} onChange={e => { const v = e.target.value; if (v && v <= yestStr && (!rangeStart || v >= rangeStart)) setRangeEnd(v); }} style={inputStyle} />
+      </div>
+    </div>
+  );
+}
+
 export default function ProductionDashboard({ signOut, userId, userEmail, userRole }) {
   const [data, setData] = useState([]);
   const [showEntry, setShowEntry] = useState(false);
@@ -1220,6 +1279,10 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   const closeComments = () => { setCommentsOpen(false); setCommentsDate(null); setCommentsRefreshTick(t => t + 1); };
 
   const [selectedDate, setSelectedDate] = useState(null);
+  const [rangeStart, setRangeStart] = useState("");
+  const [rangeEnd, setRangeEnd] = useState("");
+  const [fillerStart, setFillerStart] = useState("");
+  const [fillerEnd, setFillerEnd] = useState("");
 
   const sum = (a, k) => a.reduce((s, e) => s + (e[k] || 0), 0);
   const todayDateStr = productionDateStr(now);
@@ -1233,9 +1296,16 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   useEffect(() => {
     if (selectedDate == null) setSelectedDate(todayDateStr);
   }, [selectedDate, todayDateStr]);
+  useEffect(() => {
+    const end = new Date(todayDateStr + "T12:00:00"); end.setDate(end.getDate() - 1);
+    const start = new Date(end); start.setDate(start.getDate() - 6);
+    if (!rangeEnd) { setRangeEnd(localDateStr(end)); setRangeStart(localDateStr(start)); }
+    if (!fillerEnd) { setFillerEnd(localDateStr(end)); setFillerStart(localDateStr(start)); }
+  }, [rangeEnd, fillerEnd, todayDateStr]);
   // resolve from full data (incl. today) so Day View can show the live day
   const selectedEntry = selectedDate ? data.find(d => d.date === selectedDate) : null;
   const selTotal = eTotal(selectedEntry), selTarget = eTarget(selectedEntry), selCap = eCap(selectedEntry);
+  const selPace = selectedEntry ? paceStats(selectedEntry, selectedDate, now) : null;
   const latestTotal = eTotal(latest), latestTarget = eTarget(latest), latestCap = eCap(latest), prevTotal = eTotal(previous);
   const last5 = ranDays.slice(0, 5), prev5 = ranDays.slice(5, 10);
   const avg5 = last5.length > 0 ? last5.reduce((s, e) => s + eTotal(e), 0) / last5.length : 0;
@@ -1258,12 +1328,36 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   const weekRangeLabel = weekEntries.length > 0
     ? `${formatDate([...weekEntries].sort((a,b)=>a.date.localeCompare(b.date))[0].date)} – ${formatDate([...weekEntries].sort((a,b)=>b.date.localeCompare(a.date))[0].date)}`
     : "—";
-  const recent = sorted.slice(0, 7).reverse();
+  // Daily breakdown range — defaults to the last 7 days ending yesterday; the
+  // user can pick any range or a preset. Newest day on top.
+  const yestStr = (() => { const y = new Date(todayDateStr + "T12:00:00"); y.setDate(y.getDate() - 1); return localDateStr(y); })();
+  const rangeReady = rangeStart && rangeEnd;
+  const rangeEntries = (rangeReady
+    ? historical.filter(d => d.date >= rangeStart && d.date <= rangeEnd)
+    : sorted.slice(0, 7)
+  ).sort((a, b) => b.date.localeCompare(a.date));
+  const applyRangePreset = (n) => {
+    const s = new Date(yestStr + "T12:00:00"); s.setDate(s.getDate() - (n - 1));
+    setRangeStart(localDateStr(s)); setRangeEnd(yestStr);
+  };
+  const fillerEntries = ((fillerStart && fillerEnd)
+    ? historical.filter(d => d.date >= fillerStart && d.date <= fillerEnd)
+    : sorted.slice(0, 5)
+  ).sort((a, b) => b.date.localeCompare(a.date));
+  const applyFillerPreset = (n) => {
+    const s = new Date(yestStr + "T12:00:00"); s.setDate(s.getDate() - (n - 1));
+    setFillerStart(localDateStr(s)); setFillerEnd(yestStr);
+  };
   // Nag only for weekdays that aren't marked off — we don't run weekends or
   // holidays, so a 0 there is expected, not a missing log.
   const pendingEntries = historical.filter(e =>
     (e.line1_produced || 0) === 0 && (e.line2_produced || 0) === 0 &&
     !isWeekendStr(e.date) && !offDays.has(e.date));
+
+  // Top 2 single-day outputs per line across every day on record (record +
+  // runner-up). Recomputes on each data load, so a new high shows automatically.
+  const topDays = (key) => [...data].filter(e => (e[key] || 0) > 0).sort((a, b) => (b[key] || 0) - (a[key] || 0)).slice(0, 2).map(e => ({ v: e[key], date: e.date }));
+  const topL1 = topDays("line1_produced"), topL2 = topDays("line2_produced");
 
   if (loading) return <div style={{ minHeight: "100vh", background: T.bg, display: "flex", alignItems: "center", justifyContent: "center" }}><div style={{ fontFamily: "'JetBrains Mono', monospace", color: T.textLight }}>Loading...</div></div>;
 
@@ -1354,10 +1448,16 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
                 <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic", padding: "10px 0" }}>No production data for this date.</div>
               )}
               <div style={{ display: "flex", justifyContent: "center", gap: 16, flexWrap: "wrap" }}>
-                <DualGauge produced={selectedEntry?.line1_produced || 0} target={selectedEntry?.line1_target || 0} capacity={selectedEntry?.line1_capacity || 0} label="Line I" colorA={T.teal} />
-                <DualGauge produced={selectedEntry?.line2_produced || 0} target={selectedEntry?.line2_target || 0} capacity={selectedEntry?.line2_capacity || 0} label="Line II" colorA={T.coral} />
-                <DualGauge produced={selTotal} target={selTarget || 0} capacity={selCap || 0} label="Combined" colorA={T.gold} />
+                <DualGauge eff={selPace?.eff1} rHr={selPace?.rHr1} rMin={selPace?.rMin1} label="Line I" colorA={T.teal} />
+                <DualGauge eff={selPace?.eff2} rHr={selPace?.rHr2} rMin={selPace?.rMin2} label="Line II" colorA={T.coral} />
+                <DualGauge eff={selPace?.effTot} rHr={selPace?.rHrTot} rMin={selPace?.rMinTot} label="Combined" colorA={T.gold} />
               </div>
+              {selectedEntry && selCap > 0 && (
+                <div style={{ marginTop: 6, textAlign: "center", fontSize: 12, color: "#000", fontFamily: "var(--mono)" }}>
+                  {selectedDate === todayDateStr ? "On pace vs capacity" : "Efficiency vs capacity"} ·{" "}
+                  <b>{fmt(selPace?.pTot || 0)}</b> made / <b>{fmt(Math.round(selPace?.expTot || 0))}</b> expected {selectedDate === todayDateStr ? "by now" : "(20h)"}
+                </div>
+              )}
               {selectedEntry?.notes && <div style={{ marginTop: 10, padding: "7px 12px", background: T.tealBg, borderRadius: 6, fontSize: 11, color: T.textMid, fontStyle: "italic", textAlign: "left" }}>💬 {selectedEntry.notes}</div>}
               {selectedDate && (
                 <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.border}`, textAlign: "left" }}>
@@ -1381,6 +1481,21 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
             <StatCard title="This Week" value={fmt(weekP)}
               sub={`${weekRangeLabel} · ${weekEntries.length}d\nCap hit: ${pc(weekP, weekC)}% · Tgt hit: ${pc(weekP, weekT)}%`}
               accent={perfColor(weekEff)} />
+            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 10, padding: "14px 16px", flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)", marginBottom: 8 }}>Record Days</div>
+              {[{ l: "L1", color: T.teal, top: topL1 }, { l: "L2", color: T.coral, top: topL2 }].map(({ l, color, top }) => (
+                <div key={l} style={{ marginBottom: l === "L1" ? 8 : 0 }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, color, fontFamily: "var(--mono)" }}>{l}</span>
+                  {top.length === 0 && <span style={{ fontSize: 12, color: T.textFaint, marginLeft: 6 }}>—</span>}
+                  {top.map((d, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, marginTop: 2 }}>
+                      <span style={{ fontSize: i === 0 ? 20 : 13, fontWeight: i === 0 ? 800 : 700, color: i === 0 ? T.text : T.textMid, fontFamily: "var(--mono)", lineHeight: 1, letterSpacing: -0.5 }}>{fmt(d.v)}</span>
+                      <span style={{ fontSize: 11, color: T.textMid, fontFamily: "var(--mono)", whiteSpace: "nowrap" }}>{formatDayShort(d.date)}</span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
             <MonthlyProgressCard monthEntries={monthEntries} now={now} isManager={userRole === "manager"} />
           </div>
           <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 14, marginTop: -10, marginBottom: 14, fontSize: 10, fontFamily: "var(--mono)", color: T.textMid }}>
@@ -1397,17 +1512,19 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
           <MonthComparison data={historical} />
           <NotesPanel entries={historical} expanded={notesOpen} onToggle={() => setNotesOpen(!notesOpen)} />
 
+          <RangePicker title="Filler Start" count={fillerEntries.length} rangeStart={fillerStart} rangeEnd={fillerEnd} setRangeStart={setFillerStart} setRangeEnd={setFillerEnd} yestStr={yestStr} applyPreset={applyFillerPreset} />
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 12, marginBottom: 18 }}>
-            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16 }}><FillerCard entries={historical} line={1} /></div>
-            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16 }}><FillerCard entries={historical} line={2} /></div>
+            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16 }}><FillerCard entries={fillerEntries} line={1} /></div>
+            <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16 }}><FillerCard entries={fillerEntries} line={2} /></div>
           </div>
 
+          <RangePicker title="Daily Breakdown" count={rangeEntries.length} rangeStart={rangeStart} rangeEnd={rangeEnd} setRangeStart={setRangeStart} setRangeEnd={setRangeEnd} yestStr={yestStr} applyPreset={applyRangePreset} />
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 12 }}>
             {[{ label: "Line I", key: "line1", color: T.teal }, { label: "Line II", key: "line2", color: T.coral }].map(({ label, key, color }) => (
               <div key={key} style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16 }}>
-                <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, marginBottom: 12, fontFamily: "var(--mono)" }}>Last 7 Days — {label}</div>
-                {recent.length === 0 && <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic" }}>No data yet</div>}
-                {recent.map(e => <MiniBar key={e.date + key} produced={e[`${key}_produced`]} target={e[`${key}_target`]} capacity={e[`${key}_capacity`] || e[`${key}_target`]} label={`${formatDate(e.date)} · ${e.product}`} color={color} hasNote={!!e.notes} />)}
+                <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, marginBottom: 12, fontFamily: "var(--mono)" }}>{label}</div>
+                {rangeEntries.length === 0 && <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic" }}>No data in this range</div>}
+                {rangeEntries.map(e => <MiniBar key={e.date + key} produced={e[`${key}_produced`]} target={e[`${key}_target`]} capacity={e[`${key}_capacity`] || e[`${key}_target`]} label={`${formatDate(e.date)} · ${e.product}`} color={color} hasNote={!!e.notes} />)}
               </div>
             ))}
           </div>
