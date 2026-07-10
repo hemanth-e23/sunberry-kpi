@@ -103,21 +103,26 @@ function expectedByNow(dateStr, startTime, target, now) {
 // throughput (per hr / per min). Expected is anchored to the last sync so it
 // doesn't outrun a frozen produced count; a completed past day uses the full
 // 20h window (efficiency = produced / capacity = the gauge's CAP number).
-function paceStats(entry, dateStr, now) {
+// `mode` decides where each line's 20h pace clock starts — and it anchors BOTH
+// the efficiency % and the live bottle rate (/hr · /min) so the two always
+// agree. "target": start from the target filler time (a late-starting line
+// reads as behind, not artificially ahead). "scan": start from the actual
+// first-scan time (rate/efficiency reflect only the time the line has truly run).
+function paceStats(entry, dateStr, now, mode = "target") {
   const p1 = entry?.line1_produced || 0, p2 = entry?.line2_produced || 0;
   const c1 = entry?.line1_capacity || 0, c2 = entry?.line2_capacity || 0;
   const rawSync = entry?.last_synced_at ? new Date(entry.last_synced_at) : null;
   const refTime = (rawSync && productionDateStr(rawSync) === dateStr) ? rawSync : now;
-  // Expected-by-now (and thus efficiency %) is paced from the TARGET start time
-  // — when the line was supposed to begin — so a line that starts late reads as
-  // behind, not artificially ahead. The live bottle rate (/hr · /min) uses the
-  // ACTUAL first-scan start so it reflects real machine throughput.
-  const eFrac1 = paceFraction(dateStr, entry?.line1_filler_target || entry?.line1_filler_start, refTime);
-  const eFrac2 = paceFraction(dateStr, entry?.line2_filler_target || entry?.line2_filler_start, refTime);
-  const rFrac1 = paceFraction(dateStr, entry?.line1_filler_start, refTime);
-  const rFrac2 = paceFraction(dateStr, entry?.line2_filler_start, refTime);
-  const exp1 = c1 * eFrac1, exp2 = c2 * eFrac2;
-  const min1 = rFrac1 * PACE_WINDOW_MIN, min2 = rFrac2 * PACE_WINDOW_MIN;
+  const start1 = mode === "scan"
+    ? (entry?.line1_filler_start || entry?.line1_filler_target)
+    : (entry?.line1_filler_target || entry?.line1_filler_start);
+  const start2 = mode === "scan"
+    ? (entry?.line2_filler_start || entry?.line2_filler_target)
+    : (entry?.line2_filler_target || entry?.line2_filler_start);
+  const frac1 = paceFraction(dateStr, start1, refTime);
+  const frac2 = paceFraction(dateStr, start2, refTime);
+  const exp1 = c1 * frac1, exp2 = c2 * frac2;
+  const min1 = frac1 * PACE_WINDOW_MIN, min2 = frac2 * PACE_WINDOW_MIN;
   const rMin1 = min1 > 0 ? p1 / min1 : null, rMin2 = min2 > 0 ? p2 / min2 : null;
   const pTot = p1 + p2, expTot = exp1 + exp2;
   const rMinTot = (rMin1 || 0) + (rMin2 || 0) || null;
@@ -1288,6 +1293,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   const closeComments = () => { setCommentsOpen(false); setCommentsDate(null); setCommentsRefreshTick(t => t + 1); };
 
   const [selectedDate, setSelectedDate] = useState(null);
+  const [paceMode, setPaceMode] = useState("target"); // "target" | "scan"
   const [rangeStart, setRangeStart] = useState("");
   const [rangeEnd, setRangeEnd] = useState("");
   const [fillerStart, setFillerStart] = useState("");
@@ -1314,7 +1320,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   // resolve from full data (incl. today) so Day View can show the live day
   const selectedEntry = selectedDate ? data.find(d => d.date === selectedDate) : null;
   const selTotal = eTotal(selectedEntry), selTarget = eTarget(selectedEntry), selCap = eCap(selectedEntry);
-  const selPace = selectedEntry ? paceStats(selectedEntry, selectedDate, now) : null;
+  const selPace = selectedEntry ? paceStats(selectedEntry, selectedDate, now, paceMode) : null;
   const latestTotal = eTotal(latest), latestTarget = eTarget(latest), latestCap = eCap(latest), prevTotal = eTotal(previous);
   const last5 = ranDays.slice(0, 5), prev5 = ranDays.slice(5, 10);
   const avg5 = last5.length > 0 ? last5.reduce((s, e) => s + eTotal(e), 0) / last5.length : 0;
@@ -1451,7 +1457,18 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
                 <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>
                   Day View {selectedEntry && <span style={{ color: T.text, fontSize: 11, textTransform: "none", fontWeight: 600 }}>({formatDayShort(selectedEntry.date)} · {selectedEntry.product})</span>}
                 </div>
-                <input type="date" value={selectedDate || ""} max={todayDateStr} onChange={e => { const v = e.target.value; if (v && v <= todayDateStr) setSelectedDate(v); }} style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 5, color: T.text, padding: "5px 9px", fontSize: 12, fontFamily: "var(--mono)", outline: "none", cursor: "pointer" }} />
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ display: "inline-flex", border: `1px solid ${T.inputBorder}`, borderRadius: 5, overflow: "hidden", fontFamily: "var(--mono)", fontSize: 11 }} title="Where each line's pace clock starts — both efficiency % and bottle rate">
+                    {[["target", "Target start"], ["scan", "First scan"]].map(([m, lbl]) => (
+                      <button key={m} type="button" onClick={() => setPaceMode(m)}
+                        style={{ padding: "5px 9px", border: "none", cursor: "pointer", fontFamily: "var(--mono)", fontSize: 11,
+                          background: paceMode === m ? T.text : "transparent", color: paceMode === m ? T.bg : T.textMid, fontWeight: paceMode === m ? 700 : 500 }}>
+                        {lbl}
+                      </button>
+                    ))}
+                  </div>
+                  <input type="date" value={selectedDate || ""} max={todayDateStr} onChange={e => { const v = e.target.value; if (v && v <= todayDateStr) setSelectedDate(v); }} style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 5, color: T.text, padding: "5px 9px", fontSize: 12, fontFamily: "var(--mono)", outline: "none", cursor: "pointer" }} />
+                </div>
               </div>
               {!selectedEntry && selectedDate && (
                 <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic", padding: "10px 0" }}>No production data for this date.</div>
@@ -1465,6 +1482,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
                 <div style={{ marginTop: 6, textAlign: "center", fontSize: 12, color: "#000", fontFamily: "var(--mono)" }}>
                   {selectedDate === todayDateStr ? "On pace vs capacity" : "Efficiency vs capacity"} ·{" "}
                   <b>{fmt(selPace?.pTot || 0)}</b> made / <b>{fmt(Math.round(selPace?.expTot || 0))}</b> expected {selectedDate === todayDateStr ? "by now" : "(20h)"}
+                  <span style={{ color: T.textMid }}> · from {paceMode === "scan" ? "first scan" : "target start"}</span>
                 </div>
               )}
               {selectedEntry?.notes && <div style={{ marginTop: 10, padding: "7px 12px", background: T.tealBg, borderRadius: 6, fontSize: 11, color: T.textMid, fontStyle: "italic", textAlign: "left" }}>💬 {selectedEntry.notes}</div>}
