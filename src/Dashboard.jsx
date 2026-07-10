@@ -108,10 +108,16 @@ function paceStats(entry, dateStr, now) {
   const c1 = entry?.line1_capacity || 0, c2 = entry?.line2_capacity || 0;
   const rawSync = entry?.last_synced_at ? new Date(entry.last_synced_at) : null;
   const refTime = (rawSync && productionDateStr(rawSync) === dateStr) ? rawSync : now;
-  const frac1 = paceFraction(dateStr, entry?.line1_filler_start, refTime);
-  const frac2 = paceFraction(dateStr, entry?.line2_filler_start, refTime);
-  const exp1 = c1 * frac1, exp2 = c2 * frac2;
-  const min1 = frac1 * PACE_WINDOW_MIN, min2 = frac2 * PACE_WINDOW_MIN;
+  // Expected-by-now (and thus efficiency %) is paced from the TARGET start time
+  // — when the line was supposed to begin — so a line that starts late reads as
+  // behind, not artificially ahead. The live bottle rate (/hr · /min) uses the
+  // ACTUAL first-scan start so it reflects real machine throughput.
+  const eFrac1 = paceFraction(dateStr, entry?.line1_filler_target || entry?.line1_filler_start, refTime);
+  const eFrac2 = paceFraction(dateStr, entry?.line2_filler_target || entry?.line2_filler_start, refTime);
+  const rFrac1 = paceFraction(dateStr, entry?.line1_filler_start, refTime);
+  const rFrac2 = paceFraction(dateStr, entry?.line2_filler_start, refTime);
+  const exp1 = c1 * eFrac1, exp2 = c2 * eFrac2;
+  const min1 = rFrac1 * PACE_WINDOW_MIN, min2 = rFrac2 * PACE_WINDOW_MIN;
   const rMin1 = min1 > 0 ? p1 / min1 : null, rMin2 = min2 > 0 ? p2 / min2 : null;
   const pTot = p1 + p2, expTot = exp1 + exp2;
   const rMinTot = (rMin1 || 0) + (rMin2 || 0) || null;
