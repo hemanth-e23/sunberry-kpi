@@ -268,7 +268,7 @@ function isoHHMM(iso) { return iso ? iso.slice(11, 16) : null; }
 // Today's per-product breakdown + a time-bucketed (60/30/15-min) case timeline,
 // pulled live from the inventory backend via the `production-detail` edge
 // function. Answers "what are we making today" and "which window was slow".
-function ProductionDetail({ date, isToday }) {
+function ProductionDetail({ date, isToday, caps }) {
   const [bucket, setBucket] = useState(60);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -330,8 +330,11 @@ function ProductionDetail({ date, isToday }) {
       const hh = String(Math.floor(t / 60)).padStart(2, "0"), mm = String(t % 60).padStart(2, "0");
       return `2000-01-01T${hh}:${mm}:00${winOffset}`;
     };
+    // Render the WHOLE production-day window (05:30 → next-day 05:30), not just
+    // up to the last scan — empty hours show as gray capacity slots.
+    const lastIdx = Math.max(maxIdx, data?.num_buckets ? data.num_buckets - 1 : maxIdx);
     const out = [];
-    for (let i = 0; i <= maxIdx; i++) {
+    for (let i = 0; i <= lastIdx; i++) {
       const b = byIdx.get(i);
       if (b) { out.push(b); continue; }
       out.push({ idx: i, start: synthStart(i), L1: 0, L2: 0, total: 0, synth: true });
@@ -339,10 +342,38 @@ function ProductionDetail({ date, isToday }) {
     return out;
   })();
 
-  const maxTotal = Math.max(1, ...buckets.map(b => b.total));
-  const active = buckets.filter(b => b.total > 0);
-  const peak = active.length ? active.reduce((a, b) => (b.total > a.total ? b : a)) : null;
-  const slow = active.length ? active.reduce((a, b) => (b.total < a.total ? b : a)) : null;
+  const bmin = data?.bucket_minutes || bucket;
+  const LINES = [
+    { key: "1", label: "Line I", color: T.teal },
+    { key: "2", label: "Line II", color: T.coral },
+  ];
+  const dayProd = { "1": 0, "2": 0 };
+  buckets.forEach(b => { dayProd["1"] += b.L1; dayProd["2"] += b.L2; });
+  // Capacity for one bucket = the line's rated daily capacity spread evenly over
+  // the 20h production run (same window the pace gauges use).
+  const capPerBucket = (k) => (caps?.[k] || 0) * bmin / PACE_WINDOW_MIN;
+  // Show every line with capacity or production — an idle line still appears as
+  // an empty gray capacity slot, so you can see it didn't run.
+  let shownLines = LINES.filter(L => capPerBucket(L.key) > 0 || dayProd[L.key] > 0);
+  if (!shownLines.length) shownLines = LINES;
+  const hasCap = shownLines.some(L => capPerBucket(L.key) > 0);
+
+  // Scale bar heights by the tallest produced value or per-bucket capacity so
+  // the gray capacity "ceiling" and the solid "made" fill are comparable.
+  const maxBar = Math.max(1, ...buckets.map(b => Math.max(b.L1, b.L2)), ...shownLines.map(L => capPerBucket(L.key)));
+
+  // Headline % for a window = cases made ÷ capacity of the line(s) RUNNING that
+  // window, so an idle second line doesn't drag the number down.
+  const runCap = (b) => shownLines.reduce((s, L) => s + (((L.key === "1" ? b.L1 : b.L2) > 0) ? capPerBucket(L.key) : 0), 0);
+  const utilPct = (b) => { const rc = runCap(b); return rc > 0 ? Math.round((b.total / rc) * 100) : null; };
+
+  // Best / worst over the running span (first→last active window) by volume.
+  const activeIdxs = buckets.filter(b => b.total > 0).map(b => b.idx);
+  const span = activeIdxs.length
+    ? buckets.filter(b => b.idx >= Math.min(...activeIdxs) && b.idx <= Math.max(...activeIdxs))
+    : [];
+  const peak = span.length ? span.reduce((a, b) => (b.total > a.total ? b : a)) : null;
+  const slow = span.length ? span.reduce((a, b) => (b.total < a.total ? b : a)) : null;
   const totalCases = products.reduce((s, p) => s + p.cases, 0);
 
   // Before the edge function / inventory endpoint are deployed the invoke
@@ -399,40 +430,382 @@ function ProductionDetail({ date, isToday }) {
         <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic", padding: "8px 0" }}>No scanned pallets to break down yet for this day.</div>
       )}
 
-      {/* Bucketed bar chart */}
+      {/* Full production day (05:30 → next-day 05:30), one column per window.
+          Big % (green→red) = share of the running line's capacity used; gray =
+          capacity, colored fill = made. Idle/empty hours show neutral. */}
       {buckets.length > 0 && (
         <>
-          <div style={{ display: "flex", alignItems: "flex-end", gap: 3, overflowX: "auto", paddingBottom: 4, minHeight: 130 }}>
+          {hasCap && (
+            <div style={{ fontSize: 11, color: T.textMid, marginBottom: 10, lineHeight: 1.4 }}>
+              Each bar is one {bucket === 60 ? "hour" : `${bucket}-min window`} across the shift. The <b style={{ color: T.text }}>%</b> is how much of the running line's capacity it used —{" "}
+              <span style={{ color: T.teal, fontWeight: 700 }}>green = strong</span>,{" "}
+              <span style={{ color: T.gold, fontWeight: 700 }}>amber = watch</span>,{" "}
+              <span style={{ color: T.coral, fontWeight: 700 }}>red = slow</span>. Gray = full capacity.
+            </div>
+          )}
+          <div style={{ display: "flex", alignItems: "flex-end", gap: bucket === 60 ? 8 : 4, overflowX: "auto", paddingBottom: 4 }}>
             {buckets.map(b => {
-              const h = (b.total / maxTotal) * 110;
-              const l1h = b.total > 0 ? (b.L1 / b.total) * h : 0;
-              const l2h = b.total > 0 ? (b.L2 / b.total) * h : 0;
+              const u = utilPct(b);
+              const perf = u != null ? perfColor(u) : T.textFaint;
               const isSlow = slow && b.idx === slow.idx;
               const isPeak = peak && b.idx === peak.idx;
+              const barW = bucket === 15 ? 10 : bucket === 30 ? 14 : 22;
+              const showLbl = bucket === 60 || b.idx % (60 / bucket) === 0;
+              const H = 100;
+              const cTime = (hhmm) => formatTime12(hhmm).replace(":00", "").replace(" AM", "a").replace(" PM", "p");
               return (
-                <div key={b.idx} title={`${rangeLabel(b)} · ${fmt(b.total)} cases (L1 ${fmt(b.L1)} · L2 ${fmt(b.L2)})`}
-                  style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: "0 0 auto", minWidth: bucket === 15 ? 14 : bucket === 30 ? 20 : 30 }}>
-                  <div style={{ fontSize: 8, color: T.textMid, fontFamily: "var(--mono)", marginBottom: 2, height: 10 }}>
-                    {b.total > 0 && (isSlow || isPeak || bucket === 60) ? fmt(b.total) : ""}
+                <div key={b.idx} title={`${rangeLabel(b)} — made ${fmt(b.total)}${u != null ? ` · ${u}% of running capacity` : ""}`}
+                  style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: "0 0 auto",
+                    padding: "3px 3px", borderRadius: 6,
+                    background: isSlow ? "rgba(217,74,66,0.08)" : isPeak ? "rgba(14,153,144,0.08)" : "transparent" }}>
+                  {/* headline % (— for empty/idle windows, not a scary red 0) */}
+                  <div style={{ fontSize: bucket === 60 ? 13 : 10, fontWeight: 800, fontFamily: "var(--mono)", color: perf, height: 18, lineHeight: "18px" }}>
+                    {u != null ? `${u}%` : (hasCap ? "—" : fmt(b.total))}
                   </div>
-                  <div style={{ width: "100%", height: 112, display: "flex", flexDirection: "column", justifyContent: "flex-end", position: "relative" }}>
-                    {isSlow && b.total > 0 && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 112, border: `1px dashed ${T.coral}`, borderRadius: 3, opacity: 0.5 }} />}
-                    <div style={{ width: "100%", height: l2h, background: T.coral, borderRadius: "3px 3px 0 0" }} />
-                    <div style={{ width: "100%", height: l1h, background: T.teal, borderRadius: l2h > 0 ? 0 : "3px 3px 0 0" }} />
+                  {/* per-line bars: gray ceiling = capacity, colored fill = made */}
+                  <div style={{ display: "flex", alignItems: "flex-end", gap: 2 }}>
+                    {shownLines.map(L => {
+                      const prod = L.key === "1" ? b.L1 : b.L2;
+                      const cap = capPerBucket(L.key);
+                      const ph = prod > 0 ? Math.max(3, (prod / maxBar) * H) : 0;
+                      const ch = cap > 0 ? (cap / maxBar) * H : 0;
+                      return (
+                        <div key={L.key} title={`${L.label}: made ${fmt(prod)}${cap > 0 ? ` of ${fmt(Math.round(cap))} (${Math.round((prod / cap) * 100)}%)` : ""}`}
+                          style={{ position: "relative", width: barW, height: H, display: "flex", alignItems: "flex-end" }}>
+                          {ch > 0 && <div style={{ position: "absolute", bottom: 0, left: 0, width: barW, height: ch, background: T.gaugeBg, borderRadius: "3px 3px 0 0" }} />}
+                          <div style={{ position: "relative", width: barW, height: ph, background: L.color, borderRadius: "3px 3px 0 0" }} />
+                        </div>
+                      );
+                    })}
                   </div>
-                  <div style={{ fontSize: 8, color: T.textLight, fontFamily: "var(--mono)", marginTop: 3, whiteSpace: "nowrap", transform: bucket !== 60 ? "rotate(-45deg)" : "none", transformOrigin: "center", height: 12 }}>
-                    {bucket === 60 || b.idx % (60 / bucket) === 0 ? isoHHMM(b.start) : ""}
+                  {/* time window */}
+                  <div style={{ fontSize: 9, color: T.textMid, fontFamily: "var(--mono)", marginTop: 4, whiteSpace: "nowrap", height: 11 }}>
+                    {showLbl ? cTime(isoHHMM(b.start)) : ""}
                   </div>
+                  {/* concrete cases made (1-hr view has room) */}
+                  {bucket === 60 && (
+                    <div style={{ fontSize: 8, color: T.textLight, fontFamily: "var(--mono)", height: 10 }}>
+                      {b.total > 0 ? fmt(b.total) : ""}
+                    </div>
+                  )}
                 </div>
               );
             })}
           </div>
-          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 8, fontSize: 11, fontFamily: "var(--mono)", color: T.textMid, alignItems: "center" }}>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><span style={{ width: 10, height: 10, background: T.teal, borderRadius: 2 }} /> Line I</span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><span style={{ width: 10, height: 10, background: T.coral, borderRadius: 2 }} /> Line II</span>
-            {peak && <span>Peak <b style={{ color: T.text }}>{rangeLabel(peak)}</b> · {fmt(peak.total)}</span>}
-            {slow && slow.idx !== peak?.idx && <span style={{ color: T.coral }}>Slowest <b>{rangeLabel(slow)}</b> · {fmt(slow.total)}</span>}
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 10, fontSize: 11, fontFamily: "var(--mono)", color: T.textMid, alignItems: "center" }}>
+            {shownLines.map(L => (
+              <span key={L.key} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                <span style={{ width: 10, height: 10, background: L.color, borderRadius: 2 }} /> {L.label} made
+              </span>
+            ))}
+            {hasCap && <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><span style={{ width: 10, height: 10, background: T.gaugeBg, borderRadius: 2 }} /> capacity</span>}
+            {peak && <span style={{ color: T.teal }}>Best <b>{rangeLabel(peak)}</b>{utilPct(peak) != null ? ` · ${utilPct(peak)}%` : ` · ${fmt(peak.total)}`}</span>}
+            {slow && slow.idx !== peak?.idx && <span style={{ color: T.coral }}>Worst <b>{rangeLabel(slow)}</b>{utilPct(slow) != null ? ` · ${utilPct(slow)}%` : ` · ${fmt(slow.total)}`}</span>}
           </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Per-day, per-line, per-product cases for a list of dates — fetched from the
+// already-deployed `production-detail` endpoint (one call per day, in parallel),
+// so no new backend endpoint is needed. Returns { date: { "1": [{name,cases}], "2": [...] } }.
+function useDailyProducts(dates) {
+  const key = (dates || []).filter(Boolean).join(",");
+  const [byDate, setByDate] = useState({});
+  useEffect(() => {
+    const ds = key ? key.split(",") : [];
+    if (!ds.length) { setByDate({}); return; }
+    let cancelled = false;
+    Promise.all(ds.map(d =>
+      supabase.functions.invoke("production-detail", { body: { date: d } })
+        .then(({ data: res, error }) => (error || res?.error) ? null : { d, products: res?.products || [] })
+        .catch(() => null)
+    )).then(results => {
+      if (cancelled) return;
+      const m = {};
+      for (const r of results) {
+        if (!r) continue;
+        const by = { "1": [], "2": [] };
+        for (const p of r.products) {
+          if (!p.line_number || !by[p.line_number]) continue;
+          by[p.line_number].push({ name: p.product_name || p.short_code || "Unknown", cases: p.cases || 0 });
+        }
+        for (const k of ["1", "2"]) by[k].sort((a, b) => b.cases - a.cases);
+        m[r.d] = by;
+      }
+      setByDate(m);
+    });
+    return () => { cancelled = true; };
+  }, [key]);
+  return byDate;
+}
+
+// Working days (weekdays that aren't marked off) in [startStr,endStr] inclusive.
+function workingDayList(startStr, endStr, offDays) {
+  const out = [];
+  if (!startStr || !endStr) return out;
+  const d = new Date(startStr + "T12:00:00");
+  const end = new Date(endStr + "T12:00:00");
+  while (d <= end) {
+    const dow = d.getDay();
+    const ds = localDateStr(d);
+    if (dow !== 0 && dow !== 6 && !(offDays && offDays.has(ds))) out.push(ds);
+    d.setDate(d.getDate() + 1);
+  }
+  return out;
+}
+
+// Production trend: this period vs last, aligned by WORKING DAY (weekends &
+// holidays skipped on both sides, matched by position not date — so no
+// Friday-vs-Sunday or open-vs-closed mismatches). Click a day → its products;
+// pick a flavor → only its days light up + a list.
+// Production trend. Two views:
+//  • Compare — pick any two months (A vs B), aligned by WORKING DAY (weekends &
+//    holidays skipped on both sides, matched by position). Click a day to see
+//    BOTH months' numbers + flavors for that working day.
+//  • History — monthly totals over the last 12 months, to see the macro trend.
+function ProductionTrend({ data, now, offDays }) {
+  const [view, setView] = useState("compare"); // "compare" | "history"
+  const [flavor, setFlavor] = useState("");
+  const [dayPanel, setDayPanel] = useState(null);
+
+  const todayStr = productionDateStr(now);
+  const yd = new Date(todayStr + "T12:00:00"); yd.setDate(yd.getDate() - 1);
+  const yestStr = localDateStr(yd);
+  const ymKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  const ymLabel = (ym) => { const [Y, M] = ym.split("-").map(Number); return new Date(Y, M - 1, 1).toLocaleDateString("en-US", { month: "short", year: "numeric" }); };
+  const curYm = ymKey(now);
+
+  // Only offer months from the first month that actually has production back to
+  // now — no empty pre-data months in the pickers or the history view.
+  const producedDates = data.filter(e => (e.line1_produced || 0) + (e.line2_produced || 0) > 0).map(e => e.date).sort();
+  const firstYm = producedDates.length ? producedDates[0].slice(0, 7) : curYm;
+  const [fY, fM] = firstYm.split("-").map(Number);
+  const monthsSpan = (now.getFullYear() - fY) * 12 + (now.getMonth() - (fM - 1)); // 0 = same month
+  const monthOpts = [];
+  for (let k = 0; k <= Math.min(monthsSpan, 35); k++) monthOpts.push(ymKey(new Date(now.getFullYear(), now.getMonth() - k, 1)));
+  const [monthA, setMonthA] = useState(monthOpts[0]);
+  const [monthB, setMonthB] = useState(monthOpts[1] || monthOpts[0]);
+
+  const byDateMap = (() => { const m = new Map(); for (const e of data) m.set(e.date, e); return m; })();
+  const totalOf = (ds) => { const e = byDateMap.get(ds); return e ? (e.line1_produced || 0) + (e.line2_produced || 0) : 0; };
+  const capOf = (ds) => { const e = byDateMap.get(ds); return e ? (e.line1_capacity || 0) + (e.line2_capacity || 0) : 0; };
+
+  // A month runs to yesterday if it's the current (in-progress) month, else to
+  // its last day.
+  const monthBounds = (ym) => {
+    const [Y, M] = ym.split("-").map(Number);
+    const start = localDateStr(new Date(Y, M - 1, 1));
+    const end = ym === curYm ? yestStr : localDateStr(new Date(Y, M, 0));
+    return [start, end];
+  };
+  const monthRows = (ym) => { const [s, e] = monthBounds(ym); return workingDayList(s, e, offDays).map(ds => ({ date: ds, total: totalOf(ds), cap: capOf(ds) })); };
+
+  const aRows = monthRows(monthA);
+  const bRows = monthRows(monthB);
+
+  // Flavor breakdown for month A (per-day fetch; used for the flavor filter).
+  const products = useDailyProducts(view === "compare" ? aRows.map(r => r.date) : []);
+  const dayProducts = (ds) => { const p = products[ds]; const all = []; if (p) for (const k of ["1", "2"]) for (const it of p[k]) all.push(it); return all; };
+  const flavorSet = new Set();
+  for (const r of aRows) for (const it of dayProducts(r.date)) if (it.cases > 0) flavorSet.add(it.name);
+  const flavorOptions = [...flavorSet].sort();
+  const flavorCasesOn = (ds, name) => dayProducts(ds).reduce((s, it) => s + (it.name === name ? it.cases : 0), 0);
+  const flavorDays = flavor ? aRows.filter(r => flavorCasesOn(r.date, flavor) > 0) : [];
+
+  // History: monthly totals for the last 12 months.
+  const history = [];
+  for (let k = Math.min(11, monthsSpan); k >= 0; k--) {
+    const ym = ymKey(new Date(now.getFullYear(), now.getMonth() - k, 1));
+    const [s, e] = monthBounds(ym);
+    const wds = workingDayList(s, e, offDays);
+    history.push({ ym, label: ymLabel(ym), total: wds.reduce((t, ds) => t + totalOf(ds), 0), cap: wds.reduce((t, ds) => t + capOf(ds), 0), wd: wds.length });
+  }
+
+  // Click a working-day index → both months' numbers (stored) + flavors (fetched).
+  const openDay = (i) => {
+    const a = aRows[i], b = bRows[i];
+    setDayPanel({ i, aDate: a?.date || null, bDate: b?.date || null, aTotal: a?.total || 0, bTotal: b?.total || 0, aProds: null, bProds: null, loading: true });
+    const grp = (res) => { const by = { "1": [], "2": [] }; const ps = res?.data?.products || []; for (const p of ps) { if (p.line_number && by[p.line_number]) by[p.line_number].push({ name: p.product_name || p.short_code || "Unknown", cases: p.cases || 0 }); } for (const k of ["1", "2"]) by[k].sort((x, z) => z.cases - x.cases); return by; };
+    Promise.all([
+      a?.date ? supabase.functions.invoke("production-detail", { body: { date: a.date } }) : Promise.resolve(null),
+      b?.date ? supabase.functions.invoke("production-detail", { body: { date: b.date } }) : Promise.resolve(null),
+    ]).then(([ra, rb]) => setDayPanel(d => (d && d.i === i) ? { ...d, aProds: grp(ra), bProds: grp(rb), loading: false } : d));
+  };
+
+  const W = 1000, H = 210, padL = 46, padR = 14, padT = 12, padB = 30;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const wdShort = (ds) => new Date(ds + "T12:00:00").toLocaleDateString("en-US", { month: "numeric", day: "numeric" });
+  const wdFull = (ds) => new Date(ds + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+
+  const nC = Math.max(aRows.length, bRows.length, 1);
+  const yMaxC = Math.max(1, ...aRows.map(r => r.total), ...bRows.map(r => r.total), ...aRows.map(r => r.cap)) * 1.12;
+  const XC = (i) => padL + (nC <= 1 ? plotW / 2 : (i / (nC - 1)) * plotW);
+  const YC = (v) => padT + plotH - (v / yMaxC) * plotH;
+  const pathC = (rows) => rows.map((r, i) => `${i === 0 ? "M" : "L"} ${XC(i).toFixed(1)} ${YC(r.total).toFixed(1)}`).join(" ");
+  const avgCapA = aRows.length ? aRows.reduce((s, r) => s + r.cap, 0) / aRows.length : 0;
+  const labelEvery = Math.max(1, Math.ceil(nC / 9));
+
+  const nH = history.length;
+  const yMaxH = Math.max(1, ...history.map(m => m.total), ...history.map(m => m.cap)) * 1.12;
+  const XH = (i) => padL + (nH <= 1 ? plotW / 2 : (i / (nH - 1)) * plotW);
+  const YH = (v) => padT + plotH - (v / yMaxH) * plotH;
+  const pathH = history.map((m, i) => `${i === 0 ? "M" : "L"} ${XH(i).toFixed(1)} ${YH(m.total).toFixed(1)}`).join(" ");
+
+  const aTotal = aRows.reduce((s, r) => s + r.total, 0);
+  const bCum = bRows.slice(0, aRows.length).reduce((s, r) => s + r.total, 0);
+  const delta = bCum > 0 ? ((aTotal - bCum) / bCum) * 100 : null;
+
+  const yTicks = (Ymax, Yf) => [0, 0.5, 1].map(f => { const v = Ymax * f; return (
+    <g key={f}>
+      <line x1={padL} x2={W - padR} y1={Yf(v)} y2={Yf(v)} stroke={T.border} strokeWidth="1" />
+      <text x={padL - 6} y={Yf(v) + 3} textAnchor="end" fontSize="10" fill={T.textLight} fontFamily="var(--mono)">{fmt(Math.round(v))}</text>
+    </g>); });
+
+  return (
+    <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16, marginBottom: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+        <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>
+          Production Trend <span style={{ color: T.textMid, fontWeight: 600, textTransform: "none", letterSpacing: 0 }}>· {view === "compare" ? `${ymLabel(monthA)} vs ${ymLabel(monthB)}` : "Last 12 months"}</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ display: "inline-flex", border: `1px solid ${T.inputBorder}`, borderRadius: 5, overflow: "hidden", fontFamily: "var(--mono)", fontSize: 11 }}>
+            {[["compare", "Compare"], ["history", "12-month"]].map(([v, l]) => (
+              <button key={v} type="button" onClick={() => { setView(v); setDayPanel(null); }}
+                style={{ padding: "5px 10px", border: "none", cursor: "pointer", fontFamily: "var(--mono)", fontSize: 11, background: view === v ? T.text : "transparent", color: view === v ? T.bg : T.textMid, fontWeight: view === v ? 700 : 500 }}>{l}</button>
+            ))}
+          </div>
+          {view === "compare" && (
+            <>
+              <select value={monthA} onChange={e => { setMonthA(e.target.value); setDayPanel(null); setFlavor(""); }} style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 5, color: T.teal, fontWeight: 700, padding: "5px 8px", fontSize: 11, fontFamily: "var(--mono)", cursor: "pointer" }}>
+                {monthOpts.map(ym => <option key={ym} value={ym}>{ymLabel(ym)}</option>)}
+              </select>
+              <span style={{ fontSize: 11, color: T.textMid }}>vs</span>
+              <select value={monthB} onChange={e => { setMonthB(e.target.value); setDayPanel(null); }} style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 5, color: T.textMid, padding: "5px 8px", fontSize: 11, fontFamily: "var(--mono)", cursor: "pointer" }}>
+                {monthOpts.map(ym => <option key={ym} value={ym}>{ymLabel(ym)}</option>)}
+              </select>
+              <select value={flavor} onChange={e => { setFlavor(e.target.value); setDayPanel(null); }} style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 5, color: T.text, padding: "5px 8px", fontSize: 11, fontFamily: "var(--mono)", cursor: "pointer", maxWidth: 220 }}>
+                <option value="">All flavors</option>
+                {flavorOptions.map(f => <option key={f} value={f}>{f}</option>)}
+              </select>
+            </>
+          )}
+        </div>
+      </div>
+
+      {view === "compare" ? (
+        <>
+          <div style={{ fontSize: 11, color: T.textMid, marginBottom: 8 }}>
+            Aligned by working day — weekends & holidays skipped both sides. <b style={{ color: T.teal }}>━ {ymLabel(monthA)}</b> · <span style={{ color: T.textLight }}>┈ {ymLabel(monthB)}</span> · click a point to compare that working day.
+          </div>
+          <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block", overflow: "visible" }}>
+            {yTicks(yMaxC, YC)}
+            {avgCapA > 0 && <line x1={padL} x2={W - padR} y1={YC(avgCapA)} y2={YC(avgCapA)} stroke={T.text} strokeWidth="1" strokeDasharray="4 4" opacity="0.5" />}
+            {bRows.length > 1 && <path d={pathC(bRows)} fill="none" stroke={T.textLight} strokeWidth="2" strokeDasharray="3 3" opacity="0.7" />}
+            {aRows.length > 1 && <path d={pathC(aRows)} fill="none" stroke={T.teal} strokeWidth="2.5" />}
+            {aRows.map((r, i) => {
+              const isFlavorDay = flavor ? flavorCasesOn(r.date, flavor) > 0 : true;
+              const isSel = dayPanel && dayPanel.i === i;
+              const rad = isSel ? 6 : (flavor && isFlavorDay ? 5 : 3.5);
+              const fill = !isFlavorDay ? T.textFaint : (r.total > 0 ? perfColor(r.cap > 0 ? (r.total / r.cap) * 100 : 100) : T.textFaint);
+              return (
+                <g key={r.date} style={{ cursor: "pointer" }} onClick={() => openDay(i)}>
+                  <circle cx={XC(i)} cy={YC(r.total)} r={12} fill="transparent" />
+                  {isSel && <circle cx={XC(i)} cy={YC(r.total)} r={rad + 3} fill="none" stroke={T.text} strokeWidth="1.5" />}
+                  <circle cx={XC(i)} cy={YC(r.total)} r={rad} fill={fill} opacity={isFlavorDay ? 1 : 0.4} />
+                  <title>WD{i + 1} · {wdFull(r.date)}: {fmt(r.total)}{bRows[i] ? ` · ${ymLabel(monthB)} ${wdShort(bRows[i].date)}: ${fmt(bRows[i].total)}` : ""}</title>
+                </g>
+              );
+            })}
+            {aRows.map((r, i) => (i % labelEvery === 0 || i === aRows.length - 1) ? (
+              <text key={r.date} x={XC(i)} y={H - 10} textAnchor="middle" fontSize="9" fill={T.textLight} fontFamily="var(--mono)">{wdShort(r.date)}</text>
+            ) : null)}
+          </svg>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 6, fontSize: 11, fontFamily: "var(--mono)", color: T.textMid, alignItems: "center" }}>
+            <span>{ymLabel(monthA)}: <b style={{ color: T.teal }}>{fmt(aTotal)}</b> <span style={{ color: T.textLight }}>({aRows.filter(r => r.total > 0).length} days)</span></span>
+            {delta != null && <span>vs {ymLabel(monthB)} (same working days): <b style={{ color: delta >= 0 ? T.teal : T.coral }}>{delta >= 0 ? "▲" : "▼"} {Math.abs(delta).toFixed(1)}%</b></span>}
+          </div>
+
+          {/* clicked working-day: both months side by side */}
+          {dayPanel && (
+            <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
+              <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: T.text, fontWeight: 700, marginBottom: 8 }}>Working day {dayPanel.i + 1}{dayPanel.loading && <span style={{ color: T.textFaint, fontWeight: 400 }}> · loading flavors…</span>}</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
+                {[["A", monthA, T.teal, dayPanel.aDate, dayPanel.aTotal, dayPanel.aProds], ["B", monthB, T.textMid, dayPanel.bDate, dayPanel.bTotal, dayPanel.bProds]].map(([side, ym, col, dt, tot, prods]) => (
+                  <div key={side} style={{ background: T.barBg, borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+                      <span style={{ fontSize: 11, color: col, fontWeight: 700, fontFamily: "var(--mono)" }}>{dt ? wdFull(dt) : `${ymLabel(ym)} — no day`}</span>
+                      <span style={{ fontSize: 15, color: T.text, fontWeight: 800, fontFamily: "var(--mono)" }}>{fmt(tot)}</span>
+                    </div>
+                    {dt && ([["1", "L1", T.teal], ["2", "L2", T.coral]].map(([k, lbl, lc]) => {
+                      const items = prods?.[k] || [];
+                      return (
+                        <div key={k} style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 4 }}>
+                          <span style={{ fontSize: 10, fontWeight: 700, color: lc, fontFamily: "var(--mono)", flex: "0 0 20px" }}>{lbl}</span>
+                          <div style={{ display: "flex", gap: 5, flexWrap: "wrap", flex: 1 }}>
+                            {items.length ? items.map(p => (
+                              <span key={p.name} style={{ display: "inline-flex", alignItems: "baseline", gap: 4, background: T.card, borderRadius: 5, padding: "2px 6px" }}>
+                                <span style={{ fontSize: 10, color: T.textMid }}>{p.name}</span>
+                                <span style={{ fontSize: 11, color: lc, fontWeight: 700, fontFamily: "var(--mono)" }}>{fmt(p.cases)}</span>
+                              </span>
+                            )) : <span style={{ fontSize: 10, color: T.textFaint, fontStyle: "italic" }}>{dayPanel.loading ? "…" : "idle"}</span>}
+                          </div>
+                        </div>
+                      );
+                    }))}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* flavor day list */}
+          {flavor && (
+            <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
+              <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: T.text, fontWeight: 700, marginBottom: 8 }}>
+                {flavor} — {flavorDays.length} {flavorDays.length === 1 ? "day" : "days"} in {ymLabel(monthA)}
+                {flavorDays.length > 0 && <span style={{ color: T.textMid, fontWeight: 400 }}> · avg {fmt(Math.round(flavorDays.reduce((s, r) => s + flavorCasesOn(r.date, flavor), 0) / flavorDays.length))} cases</span>}
+              </div>
+              {flavorDays.length === 0 ? <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic" }}>No {flavor} days in {ymLabel(monthA)}.</div> : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {flavorDays.map(r => {
+                    const fc = flavorCasesOn(r.date, flavor);
+                    const hit = r.cap > 0 ? (r.total / r.cap) * 100 : null;
+                    return (
+                      <div key={r.date} style={{ display: "flex", alignItems: "baseline", gap: 10, fontSize: 12, fontFamily: "var(--mono)" }}>
+                        <span style={{ color: T.text, minWidth: 120 }}>{wdFull(r.date)}</span>
+                        <span style={{ color: T.teal, fontWeight: 700 }}>{fmt(fc)}</span>
+                        <span style={{ color: T.textMid }}>cases</span>
+                        {hit != null && <span style={{ color: perfColor(hit), marginLeft: "auto", fontWeight: 700 }}>{hit.toFixed(0)}% cap</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <div style={{ fontSize: 11, color: T.textMid, marginBottom: 8 }}>Monthly totals (working days only). <b style={{ color: T.teal }}>━ produced</b> · <span style={{ color: T.textLight }}>┈ capacity</span></div>
+          <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block", overflow: "visible" }}>
+            {yTicks(yMaxH, YH)}
+            {history.length > 1 && <path d={history.map((m, i) => `${i === 0 ? "M" : "L"} ${XH(i).toFixed(1)} ${YH(m.cap).toFixed(1)}`).join(" ")} fill="none" stroke={T.textLight} strokeWidth="1.5" strokeDasharray="4 4" opacity="0.7" />}
+            {history.length > 1 && <path d={pathH} fill="none" stroke={T.teal} strokeWidth="2.5" />}
+            {history.map((m, i) => (
+              <g key={m.ym} style={{ cursor: "pointer" }} onClick={() => { setView("compare"); setMonthA(m.ym); const p = new Date(Number(m.ym.slice(0, 4)), Number(m.ym.slice(5)) - 2, 1); setMonthB(ymKey(p)); setDayPanel(null); }}>
+                <circle cx={XH(i)} cy={YH(m.total)} r={12} fill="transparent" />
+                <circle cx={XH(i)} cy={YH(m.total)} r={4} fill={perfColor(m.cap > 0 ? (m.total / m.cap) * 100 : 100)} />
+                <title>{m.label}: {fmt(m.total)} cases · {m.wd} working days{m.cap > 0 ? ` · ${((m.total / m.cap) * 100).toFixed(0)}% of capacity` : ""}</title>
+              </g>
+            ))}
+            {history.map((m, i) => (
+              <text key={m.ym} x={XH(i)} y={H - 10} textAnchor="middle" fontSize="9" fill={T.textLight} fontFamily="var(--mono)">{m.label.split(" ")[0]}</text>
+            ))}
+          </svg>
+          <div style={{ fontSize: 11, color: T.textMid, fontFamily: "var(--mono)", marginTop: 6 }}>Click a month to compare it against the month before it.</div>
         </>
       )}
     </div>
@@ -609,12 +982,17 @@ function MonthlyProgressCard({ monthEntries, now, isManager, offDays }) {
   );
 }
 
-function MiniBar({ produced, target, capacity, label, color, hasNote }) {
-  const scale = Math.max(capacity || 0, target || 0, produced || 0, 1);
-  const producedPct = Math.min((produced / scale) * 100, 100);
+function MiniBar({ produced, target, capacity, label, color, hasNote, products }) {
+  // When we have the live per-flavor breakdown, use its sum as the total so the
+  // bar and the flavor chips always reconcile (the stored value is a snapshot
+  // from that day's sync and can drift when pallets are corrected later).
+  const liveTotal = products && products.length ? products.reduce((s, p) => s + (p.cases || 0), 0) : null;
+  const shown = liveTotal != null ? liveTotal : (produced || 0);
+  const scale = Math.max(capacity || 0, target || 0, shown, 1);
+  const producedPct = Math.min((shown / scale) * 100, 100);
   const targetPct = Math.min((target / scale) * 100, 100);
-  const tgtHitPct = target > 0 ? (produced / target) * 100 : null;
-  const capUtilPct = capacity > 0 ? (produced / capacity) * 100 : null;
+  const tgtHitPct = target > 0 ? (shown / target) * 100 : null;
+  const capUtilPct = capacity > 0 ? (shown / capacity) * 100 : null;
   const fixN = (n) => (n != null ? n.toFixed(1) : "—");
   return (
     <div style={{ marginBottom: 16 }}>
@@ -623,7 +1001,7 @@ function MiniBar({ produced, target, capacity, label, color, hasNote }) {
           {label}{hasNote && <span style={{ fontSize: 12, opacity: 0.5 }}>💬</span>}
         </span>
         <span style={{ fontSize: 11 }}>
-          <span style={{ color: T.text, fontWeight: 700 }}>{fmt(produced)}</span>
+          <span style={{ color: T.text, fontWeight: 700 }}>{fmt(shown)}</span>
           <span style={{ color: T.textMid }}> / {fmt(target)} tgt · {fmt(capacity)} cap</span>
         </span>
       </div>
@@ -644,6 +1022,16 @@ function MiniBar({ produced, target, capacity, label, color, hasNote }) {
         <span>Tgt hit: <span style={{ color, fontWeight: 700 }}>{fixN(tgtHitPct)}%</span></span>
         <span>Cap util: <span style={{ color: T.text, fontWeight: 600 }}>{fixN(capUtilPct)}%</span></span>
       </div>
+      {products && products.length > 0 && (
+        <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 6 }}>
+          {products.map(p => (
+            <span key={p.name} style={{ display: "inline-flex", alignItems: "baseline", gap: 4, background: T.barBg, borderRadius: 5, padding: "2px 7px" }}>
+              <span style={{ fontSize: 10, color: T.textMid }}>{p.name}</span>
+              <span style={{ fontSize: 11, color, fontWeight: 700, fontFamily: "var(--mono)" }}>{fmt(p.cases)}</span>
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -805,11 +1193,30 @@ function TodayPanel({ data, now, userId, userRole, openComments, commentsRefresh
   const [l2Start, setL2Start] = useState("");
   const [saving, setSaving] = useState(null);
   const [savedMsg, setSavedMsg] = useState(null);
+  const [prodByLine, setProdByLine] = useState({ "1": [], "2": [] });
 
   useEffect(() => {
     setL1Start(todayEntry?.line1_filler_start || "");
     setL2Start(todayEntry?.line2_filler_start || "");
   }, [todayEntry?.date, todayEntry?.line1_filler_start, todayEntry?.line2_filler_start]);
+
+  // Live per-line product breakdown for today (which SKUs each line is running).
+  useEffect(() => {
+    let cancelled = false;
+    supabase.functions
+      .invoke("production-detail", { body: { date: todayDate, bucket_minutes: 60 } })
+      .then(({ data: res, error }) => {
+        if (cancelled || error || res?.error) return;
+        const by = { "1": [], "2": [] };
+        for (const p of res?.products || []) {
+          if (!p.line_number || !by[p.line_number]) continue;
+          by[p.line_number].push({ name: p.product_name || p.short_code || "Unknown", cases: p.cases || 0 });
+        }
+        for (const k of Object.keys(by)) by[k].sort((a, b) => b.cases - a.cases);
+        if (!cancelled) setProdByLine(by);
+      });
+    return () => { cancelled = true; };
+  }, [todayDate, todayEntry?.last_synced_at]);
 
   const canEdit = userRole && userRole !== "viewer";
   const hasTodayEntry = !!todayEntry;
@@ -896,6 +1303,25 @@ function TodayPanel({ data, now, userId, userRole, openComments, commentsRefresh
               <span style={{ fontSize: 36, fontWeight: 800, color: T.text, fontFamily: "var(--mono)", lineHeight: 1, letterSpacing: -1 }}>{fmt((todayEntry.line1_produced || 0) + (todayEntry.line2_produced || 0))}</span>
             </div>
           </div>
+
+          {/* Per-line product breakdown (which SKUs each line ran today) */}
+          {(prodByLine["1"].length > 0 || prodByLine["2"].length > 0) && (
+            <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 8 }}>
+              {[["1", "L1", T.teal], ["2", "L2", T.coral]].map(([k, label, color]) => (
+                <div key={k} style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color, fontFamily: "var(--mono)", flex: "0 0 20px" }}>{label}</span>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", flex: 1 }}>
+                    {prodByLine[k].length ? prodByLine[k].map(p => (
+                      <span key={p.name} style={{ display: "inline-flex", alignItems: "baseline", gap: 5, background: T.barBg, borderRadius: 6, padding: "3px 8px" }}>
+                        <span style={{ fontSize: 11, color: T.text, fontWeight: 600 }}>{p.name}</span>
+                        <span style={{ fontSize: 12, color, fontWeight: 800, fontFamily: "var(--mono)" }}>{fmt(p.cases)}</span>
+                      </span>
+                    )) : <span style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic" }}>idle</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -1434,9 +1860,17 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   // server-side and writes via apply_production_sync (manual values are kept).
   const syncNow = useCallback(async () => {
     setSyncing(true);
-    const { data: result, error } = await supabase.functions.invoke("sync-production", { body: {} });
+    // Sync today plus the last 2 days, so late corrections to recent days settle
+    // (the KPI otherwise only ever refreshes today's stored total).
+    const today = productionDateStr(new Date());
+    const base = new Date(today + "T12:00:00");
+    const back = (n) => { const d = new Date(base); d.setDate(d.getDate() - n); return localDateStr(d); };
+    const dates = [today, back(1), back(2)];
+    const results = await Promise.all(dates.map(d =>
+      supabase.functions.invoke("sync-production", { body: { date: d } })));
     setSyncing(false);
-    if (error || result?.error) { alert("Sync failed: " + (error?.message || result?.error)); return; }
+    const bad = results.find(r => r.error || r.data?.error);
+    if (bad) { alert("Sync failed: " + (bad.error?.message || bad.data?.error)); return; }
     await loadData();
   }, [loadData]);
 
@@ -1526,10 +1960,14 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   // user can pick any range or a preset. Newest day on top.
   const yestStr = (() => { const y = new Date(todayDateStr + "T12:00:00"); y.setDate(y.getDate() - 1); return localDateStr(y); })();
   const rangeReady = rangeStart && rangeEnd;
+  // Daily breakdown skips weekends & marked holidays — no fake 0/0 rows.
   const rangeEntries = (rangeReady
     ? historical.filter(d => d.date >= rangeStart && d.date <= rangeEnd)
     : sorted.slice(0, 7)
-  ).sort((a, b) => b.date.localeCompare(a.date));
+  ).filter(e => !isWeekendStr(e.date) && !offDays.has(e.date))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const rangeDates = rangeEntries.map(e => e.date).sort();
+  const rangeProducts = useDailyProducts(rangeDates);
   const applyRangePreset = (n) => {
     const s = new Date(yestStr + "T12:00:00"); s.setDate(s.getDate() - (n - 1));
     setRangeStart(localDateStr(s)); setRangeEnd(yestStr);
@@ -1537,7 +1975,8 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   const fillerEntries = ((fillerStart && fillerEnd)
     ? historical.filter(d => d.date >= fillerStart && d.date <= fillerEnd)
     : sorted.slice(0, 5)
-  ).sort((a, b) => b.date.localeCompare(a.date));
+  ).filter(e => !isWeekendStr(e.date) && !offDays.has(e.date))
+    .sort((a, b) => b.date.localeCompare(a.date));
   const applyFillerPreset = (n) => {
     const s = new Date(yestStr + "T12:00:00"); s.setDate(s.getDate() - (n - 1));
     setFillerStart(localDateStr(s)); setFillerEnd(yestStr);
@@ -1673,7 +2112,8 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
             </div>
           </div>
 
-          {selectedDate && <ProductionDetail date={selectedDate} isToday={selectedDate === todayDateStr} />}
+          {selectedDate && <ProductionDetail date={selectedDate} isToday={selectedDate === todayDateStr}
+            caps={{ "1": selectedEntry?.line1_capacity || 0, "2": selectedEntry?.line2_capacity || 0 }} />}
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 10, marginBottom: 18 }}>
             <StatCard title="Latest" titleDetail={latest ? formatDayShort(latest.date) : ""} value={latest ? fmt(latestTotal) : "—"}
@@ -1713,11 +2153,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
             <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 9, height: 9, background: T.coral, borderRadius: "50%" }} /> {"<"} 75% behind</span>
           </div>
 
-          <div style={{ marginBottom: 18 }}>
-            <WeekComparison data={historical} now={now} />
-          </div>
-
-          <MonthComparison data={historical} />
+          <ProductionTrend data={historical} now={now} offDays={offDays} />
           <NotesPanel entries={historical} expanded={notesOpen} onToggle={() => setNotesOpen(!notesOpen)} />
 
           <RangePicker title="Filler Start" count={fillerEntries.length} rangeStart={fillerStart} rangeEnd={fillerEnd} setRangeStart={setFillerStart} setRangeEnd={setFillerEnd} yestStr={yestStr} applyPreset={applyFillerPreset} />
@@ -1732,7 +2168,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
               <div key={key} style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16 }}>
                 <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, marginBottom: 12, fontFamily: "var(--mono)" }}>{label}</div>
                 {rangeEntries.length === 0 && <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic" }}>No data in this range</div>}
-                {rangeEntries.map(e => <MiniBar key={e.date + key} produced={e[`${key}_produced`]} target={e[`${key}_target`]} capacity={e[`${key}_capacity`] || e[`${key}_target`]} label={`${formatDate(e.date)} · ${e.product}`} color={color} hasNote={!!e.notes} />)}
+                {rangeEntries.map(e => <MiniBar key={e.date + key} produced={e[`${key}_produced`]} target={e[`${key}_target`]} capacity={e[`${key}_capacity`] || e[`${key}_target`]} label={formatDate(e.date)} color={color} hasNote={!!e.notes} products={rangeProducts[e.date]?.[key === "line1" ? "1" : "2"]} />)}
               </div>
             ))}
           </div>

@@ -38,13 +38,23 @@ const CATEGORY_COLORS = {
   quality: '#C99700', staffing: '#7A5BD9', other: 'rgba(44,36,22,0.5)',
 };
 
-function CommentItem({ comment, currentUserId, isManager, onDelete }) {
+function CommentItem({ comment, currentUserId, onEdit }) {
   const isOwn = comment.author_id === currentUserId;
-  const canDelete = isOwn || isManager;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(comment.text);
+  const [saving, setSaving] = useState(false);
   const cat = comment.category;
   const catLabel = cat ? CATEGORY_LABELS[cat] : null;
   const catColor = cat ? CATEGORY_COLORS[cat] : null;
   const mins = comment.downtime_minutes;
+  const save = async () => {
+    const t = draft.trim();
+    if (!t || t === comment.text) { setEditing(false); return; }
+    setSaving(true);
+    const ok = await onEdit(comment.id, t);
+    setSaving(false);
+    if (ok) setEditing(false);
+  };
   return (
     <div style={{ padding: '10px 0', borderBottom: `1px solid ${T.border}`, textAlign: 'left' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, gap: 6, flexWrap: 'wrap' }}>
@@ -65,14 +75,25 @@ function CommentItem({ comment, currentUserId, isManager, onDelete }) {
         </span>
         <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <span title={new Date(comment.created_at).toLocaleString()} style={{ fontSize: 11, color: T.textMid, fontFamily: "'JetBrains Mono', monospace" }}>{timeAgo(comment.created_at)}</span>
-          {canDelete && (
-            <button onClick={() => { if (confirm('Delete this comment?')) onDelete(comment.id); }} title="Delete comment" style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.textLight, fontSize: 14, padding: '0 4px', lineHeight: 1 }}>×</button>
+          {isOwn && !editing && (
+            <button onClick={() => { setDraft(comment.text); setEditing(true); }} title="Edit your comment" style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.teal, fontSize: 11, padding: '0 2px', fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>edit</button>
           )}
         </span>
       </div>
-      <div style={{ fontSize: 13, color: T.text, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
-        {comment.text}
-      </div>
+      {editing ? (
+        <div>
+          <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={3} autoFocus
+            style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 6, color: T.text, padding: '8px 10px', fontSize: 13, fontFamily: "'JetBrains Mono', monospace", width: '100%', boxSizing: 'border-box', outline: 'none', resize: 'vertical', lineHeight: 1.5 }} />
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginTop: 6 }}>
+            <button onClick={() => setEditing(false)} disabled={saving} style={{ padding: '4px 10px', borderRadius: 5, border: `1px solid ${T.borderStrong}`, background: 'transparent', color: T.textMid, fontSize: 10, fontFamily: "'JetBrains Mono', monospace", textTransform: 'uppercase', cursor: 'pointer' }}>Cancel</button>
+            <button onClick={save} disabled={saving || !draft.trim()} style={{ padding: '4px 10px', borderRadius: 5, border: 'none', background: T.teal, color: '#fff', fontSize: 10, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", textTransform: 'uppercase', cursor: saving ? 'wait' : 'pointer' }}>{saving ? 'Saving…' : 'Save'}</button>
+          </div>
+        </div>
+      ) : (
+        <div style={{ fontSize: 13, color: T.text, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+          {comment.text}
+        </div>
+      )}
     </div>
   );
 }
@@ -97,9 +118,9 @@ export async function fetchCommentsBetween(startDate, endDate) {
   return data || [];
 }
 
-async function deleteComment(id) {
-  const { error } = await supabase.from('comments').delete().eq('id', id);
-  if (error) { alert('Could not delete: ' + error.message); return false; }
+async function updateComment(id, text) {
+  const { error } = await supabase.from('comments').update({ text }).eq('id', id);
+  if (error) { alert('Could not save: ' + error.message); return false; }
   return true;
 }
 
@@ -121,8 +142,10 @@ export function CommentsList({ date, currentUserId, isManager, refreshTick = 0, 
     return () => clearInterval(i);
   }, [load, date]);
 
-  const remove = async (id) => {
-    if (await deleteComment(id)) await load();
+  const edit = async (id, text) => {
+    const ok = await updateComment(id, text);
+    if (ok) await load();
+    return ok;
   };
 
   return (
@@ -142,7 +165,7 @@ export function CommentsList({ date, currentUserId, isManager, refreshTick = 0, 
           <div style={{ padding: '14px 0', fontSize: 11, color: T.textFaint, fontStyle: 'italic', textAlign: 'center' }}>No comments yet for this date.</div>
         ) : (
           comments.map((c) => (
-            <CommentItem key={c.id} comment={c} currentUserId={currentUserId} isManager={isManager} onDelete={remove} />
+            <CommentItem key={c.id} comment={c} currentUserId={currentUserId} onEdit={edit} />
           ))
         )}
       </div>
@@ -199,8 +222,10 @@ export default function CommentsModal({ initialDate, onClose, currentUserId, isM
     await load();
   };
 
-  const remove = async (id) => {
-    if (await deleteComment(id)) await load();
+  const edit = async (id, text) => {
+    const ok = await updateComment(id, text);
+    if (ok) await load();
+    return ok;
   };
 
   const onTextareaKeyDown = (e) => {
@@ -241,7 +266,7 @@ export default function CommentsModal({ initialDate, onClose, currentUserId, isM
             <div style={{ padding: '20px 0', fontSize: 12, color: T.textFaint, fontStyle: 'italic', textAlign: 'center' }}>No comments for this date yet. Be the first.</div>
           ) : (
             comments.map((c) => (
-              <CommentItem key={c.id} comment={c} currentUserId={currentUserId} isManager={isManager} onDelete={remove} />
+              <CommentItem key={c.id} comment={c} currentUserId={currentUserId} onEdit={edit} />
             ))
           )}
         </div>

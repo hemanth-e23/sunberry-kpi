@@ -31,7 +31,7 @@ Deno.serve(async (req) => {
       headers: { ...CORS, "Content-Type": "application/json" },
     });
 
-  let payload: { date?: string; bucket_minutes?: number; warehouse_id?: string } = {};
+  let payload: { date?: string; bucket_minutes?: number; warehouse_id?: string; start?: string; end?: string } = {};
   try {
     payload = await req.json();
   } catch {
@@ -39,14 +39,22 @@ Deno.serve(async (req) => {
   }
 
   const warehouseId = payload.warehouse_id || WAREHOUSE;
-  const bucket = [15, 30, 60].includes(Number(payload.bucket_minutes))
-    ? Number(payload.bucket_minutes)
-    : 30;
+  const base = `${API_BASE.replace(/\/$/, "")}/api/kpi/production`;
 
-  const url = new URL(`${API_BASE.replace(/\/$/, "")}/api/kpi/production/detail`);
-  url.searchParams.set("warehouse_id", warehouseId);
-  url.searchParams.set("bucket_minutes", String(bucket));
-  if (payload.date) url.searchParams.set("date", payload.date);
+  // Two modes: { start, end } → per-day range; otherwise → single-day detail.
+  let url: URL;
+  if (payload.start && payload.end) {
+    url = new URL(`${base}/range`);
+    url.searchParams.set("warehouse_id", warehouseId);
+    url.searchParams.set("start", payload.start);
+    url.searchParams.set("end", payload.end);
+  } else {
+    const bucket = [15, 30, 60].includes(Number(payload.bucket_minutes)) ? Number(payload.bucket_minutes) : 30;
+    url = new URL(`${base}/detail`);
+    url.searchParams.set("warehouse_id", warehouseId);
+    url.searchParams.set("bucket_minutes", String(bucket));
+    if (payload.date) url.searchParams.set("date", payload.date);
+  }
 
   try {
     const upstream = await fetch(url.toString(), {
