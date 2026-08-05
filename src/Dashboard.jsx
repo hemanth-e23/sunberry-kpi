@@ -260,6 +260,185 @@ function DualGauge({ eff, rHr, rMin, label, colorA, size = 115 }) {
   );
 }
 
+// Plant-local "HH:MM" straight out of the backend ISO string (…T09:00:00-04:00),
+// sliced rather than Date-parsed so it stays in plant time regardless of the
+// viewer's browser timezone.
+function isoHHMM(iso) { return iso ? iso.slice(11, 16) : null; }
+
+// Today's per-product breakdown + a time-bucketed (60/30/15-min) case timeline,
+// pulled live from the inventory backend via the `production-detail` edge
+// function. Answers "what are we making today" and "which window was slow".
+function ProductionDetail({ date, isToday }) {
+  const [bucket, setBucket] = useState(60);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    if (!date) return;
+    let cancelled = false;
+    setLoading(true); setErr(null);
+    supabase.functions
+      .invoke("production-detail", { body: { date, bucket_minutes: bucket } })
+      .then(({ data: res, error }) => {
+        if (cancelled) return;
+        if (error || res?.error) { setErr(error?.message || res?.error); setData(null); }
+        else setData(res);
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [date, bucket, isToday]);
+
+  // Roll the per-(line,product) rows up to one entry per product.
+  const products = (() => {
+    const m = new Map();
+    for (const p of data?.products || []) {
+      const key = p.product_name || p.short_code || p.product_id || "Unknown";
+      const cur = m.get(key) || { name: key, cases: 0, lines: new Set() };
+      cur.cases += p.cases || 0;
+      if (p.line_number) cur.lines.add(p.line_number);
+      m.set(key, cur);
+    }
+    return [...m.values()].sort((a, b) => b.cases - a.cases);
+  })();
+
+  // Dense bucket array 0..maxIdx (fill gaps with zero so a dead window shows as
+  // an empty bar, not a missing one) with L1/L2 split.
+  const buckets = (() => {
+    const rows = data?.timeline || [];
+    if (!rows.length) return [];
+    const byIdx = new Map();
+    let maxIdx = 0;
+    for (const r of rows) {
+      const idx = r.bucket_index;
+      maxIdx = Math.max(maxIdx, idx);
+      const b = byIdx.get(idx) || { idx, start: r.bucket_start, L1: 0, L2: 0, total: 0 };
+      if (r.line_number === "1") b.L1 += r.cases; else if (r.line_number === "2") b.L2 += r.cases;
+      b.total += r.cases;
+      byIdx.set(idx, b);
+    }
+    const bmin = data?.bucket_minutes || bucket;
+    // Build gap-bucket starts from the window's plant-local HH:MM so their
+    // labels line up with the backend's (only chars 11–16 are ever read). Offset
+    // is carried through verbatim; the calendar date is irrelevant to the label.
+    const winIso = data?.window_start || "";
+    const winHHMM = isoHHMM(winIso) || "05:30";
+    const winOffset = winIso.length >= 6 ? winIso.slice(-6) : "+00:00";
+    const baseMin = (() => { const [h, m] = winHHMM.split(":").map(Number); return h * 60 + m; })();
+    const synthStart = (i) => {
+      const t = (baseMin + i * bmin) % (24 * 60);
+      const hh = String(Math.floor(t / 60)).padStart(2, "0"), mm = String(t % 60).padStart(2, "0");
+      return `2000-01-01T${hh}:${mm}:00${winOffset}`;
+    };
+    const out = [];
+    for (let i = 0; i <= maxIdx; i++) {
+      const b = byIdx.get(i);
+      if (b) { out.push(b); continue; }
+      out.push({ idx: i, start: synthStart(i), L1: 0, L2: 0, total: 0, synth: true });
+    }
+    return out;
+  })();
+
+  const maxTotal = Math.max(1, ...buckets.map(b => b.total));
+  const active = buckets.filter(b => b.total > 0);
+  const peak = active.length ? active.reduce((a, b) => (b.total > a.total ? b : a)) : null;
+  const slow = active.length ? active.reduce((a, b) => (b.total < a.total ? b : a)) : null;
+  const totalCases = products.reduce((s, p) => s + p.cases, 0);
+
+  // Before the edge function / inventory endpoint are deployed the invoke
+  // errors — hide the whole card rather than show a red error to live users.
+  // Once the backend is up it renders normally.
+  if (!loading && err && products.length === 0 && buckets.length === 0) return null;
+
+  const rangeLabel = (b) => {
+    if (!b?.start) return "—";
+    const startHHMM = isoHHMM(b.start);
+    const bmin = data?.bucket_minutes || bucket;
+    // derive end HH:MM from start + bucket minutes, in plant-local time
+    const [h, mi] = startHHMM.split(":").map(Number);
+    const endTot = (h * 60 + mi + bmin) % (24 * 60);
+    const eh = String(Math.floor(endTot / 60)).padStart(2, "0"), em = String(endTot % 60).padStart(2, "0");
+    return `${formatTime12(startHHMM)}–${formatTime12(`${eh}:${em}`)}`;
+  };
+
+  return (
+    <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16, marginBottom: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+        <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>
+          {isToday ? "Producing Today" : "Products This Day"}
+          {totalCases > 0 && <span style={{ color: T.textMid, fontWeight: 600, textTransform: "none", letterSpacing: 0 }}> · {fmt(totalCases)} cases</span>}
+        </div>
+        <div style={{ display: "inline-flex", border: `1px solid ${T.inputBorder}`, borderRadius: 5, overflow: "hidden", fontFamily: "var(--mono)", fontSize: 11 }} title="Time-bucket width for the drill-down">
+          {[60, 30, 15].map(m => (
+            <button key={m} type="button" onClick={() => setBucket(m)}
+              style={{ padding: "5px 10px", border: "none", cursor: "pointer", fontFamily: "var(--mono)", fontSize: 11,
+                background: bucket === m ? T.text : "transparent", color: bucket === m ? T.bg : T.textMid, fontWeight: bucket === m ? 700 : 500 }}>
+              {m === 60 ? "1 hr" : `${m} min`}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Product chips */}
+      {products.length > 0 && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+          {products.map(p => (
+            <div key={p.name} style={{ display: "flex", alignItems: "baseline", gap: 7, background: T.tealBg, border: `1px solid ${T.border}`, borderRadius: 8, padding: "6px 11px" }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{p.name}</span>
+              <span style={{ fontSize: 14, fontWeight: 800, color: T.teal, fontFamily: "var(--mono)" }}>{fmt(p.cases)}</span>
+              <span style={{ fontSize: 10, color: T.textMid, fontFamily: "var(--mono)" }}>L{[...p.lines].sort().join("+") || "?"}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {loading && <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic", padding: "8px 0" }}>Loading live production…</div>}
+      {err && <div style={{ fontSize: 11, color: T.coral, fontStyle: "italic", padding: "8px 0" }}>Couldn't load detail: {err}</div>}
+
+      {!loading && !err && buckets.length === 0 && (
+        <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic", padding: "8px 0" }}>No scanned pallets to break down yet for this day.</div>
+      )}
+
+      {/* Bucketed bar chart */}
+      {buckets.length > 0 && (
+        <>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 3, overflowX: "auto", paddingBottom: 4, minHeight: 130 }}>
+            {buckets.map(b => {
+              const h = (b.total / maxTotal) * 110;
+              const l1h = b.total > 0 ? (b.L1 / b.total) * h : 0;
+              const l2h = b.total > 0 ? (b.L2 / b.total) * h : 0;
+              const isSlow = slow && b.idx === slow.idx;
+              const isPeak = peak && b.idx === peak.idx;
+              return (
+                <div key={b.idx} title={`${rangeLabel(b)} · ${fmt(b.total)} cases (L1 ${fmt(b.L1)} · L2 ${fmt(b.L2)})`}
+                  style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: "0 0 auto", minWidth: bucket === 15 ? 14 : bucket === 30 ? 20 : 30 }}>
+                  <div style={{ fontSize: 8, color: T.textMid, fontFamily: "var(--mono)", marginBottom: 2, height: 10 }}>
+                    {b.total > 0 && (isSlow || isPeak || bucket === 60) ? fmt(b.total) : ""}
+                  </div>
+                  <div style={{ width: "100%", height: 112, display: "flex", flexDirection: "column", justifyContent: "flex-end", position: "relative" }}>
+                    {isSlow && b.total > 0 && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 112, border: `1px dashed ${T.coral}`, borderRadius: 3, opacity: 0.5 }} />}
+                    <div style={{ width: "100%", height: l2h, background: T.coral, borderRadius: "3px 3px 0 0" }} />
+                    <div style={{ width: "100%", height: l1h, background: T.teal, borderRadius: l2h > 0 ? 0 : "3px 3px 0 0" }} />
+                  </div>
+                  <div style={{ fontSize: 8, color: T.textLight, fontFamily: "var(--mono)", marginTop: 3, whiteSpace: "nowrap", transform: bucket !== 60 ? "rotate(-45deg)" : "none", transformOrigin: "center", height: 12 }}>
+                    {bucket === 60 || b.idx % (60 / bucket) === 0 ? isoHHMM(b.start) : ""}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 8, fontSize: 11, fontFamily: "var(--mono)", color: T.textMid, alignItems: "center" }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><span style={{ width: 10, height: 10, background: T.teal, borderRadius: 2 }} /> Line I</span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><span style={{ width: 10, height: 10, background: T.coral, borderRadius: 2 }} /> Line II</span>
+            {peak && <span>Peak <b style={{ color: T.text }}>{rangeLabel(peak)}</b> · {fmt(peak.total)}</span>}
+            {slow && slow.idx !== peak?.idx && <span style={{ color: T.coral }}>Slowest <b>{rangeLabel(slow)}</b> · {fmt(slow.total)}</span>}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function StatCard({ title, titleDetail, value, sub, accent, change, changeSuffix, tag }) {
   const hasMeta = !!tag || change !== undefined;
   return (
@@ -1493,6 +1672,8 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
               )}
             </div>
           </div>
+
+          {selectedDate && <ProductionDetail date={selectedDate} isToday={selectedDate === todayDateStr} />}
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 10, marginBottom: 18 }}>
             <StatCard title="Latest" titleDetail={latest ? formatDayShort(latest.date) : ""} value={latest ? fmt(latestTotal) : "—"}
