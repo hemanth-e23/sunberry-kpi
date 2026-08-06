@@ -362,15 +362,30 @@ function ProductionDetail({ date, isToday, caps }) {
   // the gray capacity "ceiling" and the solid "made" fill are comparable.
   const maxBar = Math.max(1, ...buckets.map(b => Math.max(b.L1, b.L2)), ...shownLines.map(L => capPerBucket(L.key)));
 
+  // Which bucket is "now" (in progress) and how far into it we are, so the
+  // current hour is judged only against the minutes elapsed — not the whole
+  // hour — and never flagged worst while it's still running.
+  const asOf = data?.as_of ? new Date(data.as_of) : null;
+  const winStart = data?.window_start ? new Date(data.window_start) : null;
+  let nowIdx = null, nowFrac = 1;
+  if (asOf && winStart) {
+    const elapsedMin = (asOf - winStart) / 60000;
+    if (elapsedMin >= 0) { nowIdx = Math.floor(elapsedMin / bmin); nowFrac = Math.min(1, Math.max(0.05, (elapsedMin - nowIdx * bmin) / bmin)); }
+  }
+  const isCurrent = (b) => nowIdx != null && b.idx === nowIdx;
+  const isComplete = (b) => nowIdx == null || b.idx < nowIdx;
+  const capFrac = (b) => (isCurrent(b) ? nowFrac : 1); // prorate the in-progress window
+
   // Headline % for a window = cases made ÷ capacity of the line(s) RUNNING that
-  // window, so an idle second line doesn't drag the number down.
-  const runCap = (b) => shownLines.reduce((s, L) => s + (((L.key === "1" ? b.L1 : b.L2) > 0) ? capPerBucket(L.key) : 0), 0);
+  // window (prorated to elapsed time for the current, in-progress window).
+  const runCap = (b) => shownLines.reduce((s, L) => s + (((L.key === "1" ? b.L1 : b.L2) > 0) ? capPerBucket(L.key) * capFrac(b) : 0), 0);
   const utilPct = (b) => { const rc = runCap(b); return rc > 0 ? Math.round((b.total / rc) * 100) : null; };
 
-  // Best / worst over the running span (first→last active window) by volume.
+  // Best / worst over COMPLETE windows only (skip the in-progress current hour
+  // and anything future).
   const activeIdxs = buckets.filter(b => b.total > 0).map(b => b.idx);
   const span = activeIdxs.length
-    ? buckets.filter(b => b.idx >= Math.min(...activeIdxs) && b.idx <= Math.max(...activeIdxs))
+    ? buckets.filter(b => b.idx >= Math.min(...activeIdxs) && b.idx <= Math.max(...activeIdxs) && isComplete(b))
     : [];
   const peak = span.length ? span.reduce((a, b) => (b.total > a.total ? b : a)) : null;
   const slow = span.length ? span.reduce((a, b) => (b.total < a.total ? b : a)) : null;
@@ -437,7 +452,7 @@ function ProductionDetail({ date, isToday, caps }) {
         <>
           {hasCap && (
             <div style={{ fontSize: 11, color: T.textMid, marginBottom: 10, lineHeight: 1.4 }}>
-              Each bar is one {bucket === 60 ? "hour" : `${bucket}-min window`} across the shift. The <b style={{ color: T.text }}>%</b> is how much of the running line's capacity it used —{" "}
+              Each bar is one {bucket === 60 ? "hour" : `${bucket}-min window`}, one bar per line. The <b style={{ color: T.text }}>%</b> above each bar is how much of <b style={{ color: T.text }}>that line's</b> capacity it used —{" "}
               <span style={{ color: T.teal, fontWeight: 700 }}>green = strong</span>,{" "}
               <span style={{ color: T.gold, fontWeight: 700 }}>amber = watch</span>,{" "}
               <span style={{ color: T.coral, fontWeight: 700 }}>red = slow</span>. Gray = full capacity.
@@ -445,44 +460,47 @@ function ProductionDetail({ date, isToday, caps }) {
           )}
           <div style={{ display: "flex", alignItems: "flex-end", gap: bucket === 60 ? 8 : 4, overflowX: "auto", paddingBottom: 4 }}>
             {buckets.map(b => {
-              const u = utilPct(b);
-              const perf = u != null ? perfColor(u) : T.textFaint;
-              const isSlow = slow && b.idx === slow.idx;
-              const isPeak = peak && b.idx === peak.idx;
+              const cur = isCurrent(b);
+              const isSlow = !cur && slow && b.idx === slow.idx;
+              const isPeak = !cur && peak && b.idx === peak.idx;
               const barW = bucket === 15 ? 10 : bucket === 30 ? 14 : 22;
               const showLbl = bucket === 60 || b.idx % (60 / bucket) === 0;
               const H = 100;
               const cTime = (hhmm) => formatTime12(hhmm).replace(":00", "").replace(" AM", "a").replace(" PM", "p");
               return (
-                <div key={b.idx} title={`${rangeLabel(b)} — made ${fmt(b.total)}${u != null ? ` · ${u}% of running capacity` : ""}`}
+                <div key={b.idx} title={`${rangeLabel(b)}${cur ? " (in progress)" : ""} — made ${fmt(b.total)} cases`}
                   style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: "0 0 auto",
                     padding: "3px 3px", borderRadius: 6,
-                    background: isSlow ? "rgba(217,74,66,0.08)" : isPeak ? "rgba(14,153,144,0.08)" : "transparent" }}>
-                  {/* headline % (— for empty/idle windows, not a scary red 0) */}
-                  <div style={{ fontSize: bucket === 60 ? 13 : 10, fontWeight: 800, fontFamily: "var(--mono)", color: perf, height: 18, lineHeight: "18px" }}>
-                    {u != null ? `${u}%` : (hasCap ? "—" : fmt(b.total))}
-                  </div>
-                  {/* per-line bars: gray ceiling = capacity, colored fill = made */}
+                    background: isSlow ? "rgba(217,74,66,0.08)" : isPeak ? "rgba(14,153,144,0.08)" : cur ? "rgba(14,153,144,0.05)" : "transparent" }}>
+                  {/* each LINE its own bar with its own % above it (green→red = that line's capacity used) */}
                   <div style={{ display: "flex", alignItems: "flex-end", gap: 2 }}>
                     {shownLines.map(L => {
                       const prod = L.key === "1" ? b.L1 : b.L2;
-                      const cap = capPerBucket(L.key);
+                      const cap = capPerBucket(L.key) * capFrac(b);
+                      const lu = (prod > 0 && cap > 0) ? Math.round((prod / cap) * 100) : null;
                       const ph = prod > 0 ? Math.max(3, (prod / maxBar) * H) : 0;
                       const ch = cap > 0 ? (cap / maxBar) * H : 0;
                       return (
-                        <div key={L.key} title={`${L.label}: made ${fmt(prod)}${cap > 0 ? ` of ${fmt(Math.round(cap))} (${Math.round((prod / cap) * 100)}%)` : ""}`}
-                          style={{ position: "relative", width: barW, height: H, display: "flex", alignItems: "flex-end" }}>
-                          {ch > 0 && <div style={{ position: "absolute", bottom: 0, left: 0, width: barW, height: ch, background: T.gaugeBg, borderRadius: "3px 3px 0 0" }} />}
-                          <div style={{ position: "relative", width: barW, height: ph, background: L.color, borderRadius: "3px 3px 0 0" }} />
+                        <div key={L.key} title={`${L.label} ${rangeLabel(b)}${cur ? " (in progress)" : ""}: made ${fmt(prod)}${cap > 0 ? ` of ${fmt(Math.round(cap))}${cur ? " so far" : ""} (${lu ?? 0}%)` : ""}`}
+                          style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end" }}>
+                          {bucket === 60 && (
+                            <div style={{ fontSize: 10, fontWeight: 800, fontFamily: "var(--mono)", color: lu != null ? perfColor(lu) : T.textFaint, height: 16, lineHeight: "16px", opacity: cur ? 0.7 : 1 }}>
+                              {lu != null ? `${lu}%` : ""}
+                            </div>
+                          )}
+                          <div style={{ position: "relative", width: barW, height: H, display: "flex", alignItems: "flex-end" }}>
+                            {ch > 0 && <div style={{ position: "absolute", bottom: 0, left: 0, width: barW, height: ch, background: T.gaugeBg, borderRadius: "3px 3px 0 0" }} />}
+                            <div style={{ position: "relative", width: barW, height: ph, background: L.color, borderRadius: "3px 3px 0 0", opacity: cur ? 0.7 : 1 }} />
+                          </div>
                         </div>
                       );
                     })}
                   </div>
                   {/* time window */}
-                  <div style={{ fontSize: 9, color: T.textMid, fontFamily: "var(--mono)", marginTop: 4, whiteSpace: "nowrap", height: 11 }}>
-                    {showLbl ? cTime(isoHHMM(b.start)) : ""}
+                  <div style={{ fontSize: 9, color: cur ? T.teal : T.textMid, fontWeight: cur ? 700 : 400, fontFamily: "var(--mono)", marginTop: 4, whiteSpace: "nowrap", height: 11 }}>
+                    {cur ? "now" : (showLbl ? cTime(isoHHMM(b.start)) : "")}
                   </div>
-                  {/* concrete cases made (1-hr view has room) */}
+                  {/* concrete cases made, combined (1-hr view has room) */}
                   {bucket === 60 && (
                     <div style={{ fontSize: 8, color: T.textLight, fontFamily: "var(--mono)", height: 10 }}>
                       {b.total > 0 ? fmt(b.total) : ""}
@@ -499,8 +517,8 @@ function ProductionDetail({ date, isToday, caps }) {
               </span>
             ))}
             {hasCap && <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><span style={{ width: 10, height: 10, background: T.gaugeBg, borderRadius: 2 }} /> capacity</span>}
-            {peak && <span style={{ color: T.teal }}>Best <b>{rangeLabel(peak)}</b>{utilPct(peak) != null ? ` · ${utilPct(peak)}%` : ` · ${fmt(peak.total)}`}</span>}
-            {slow && slow.idx !== peak?.idx && <span style={{ color: T.coral }}>Worst <b>{rangeLabel(slow)}</b>{utilPct(slow) != null ? ` · ${utilPct(slow)}%` : ` · ${fmt(slow.total)}`}</span>}
+            {peak && <span style={{ color: T.teal }}>Best <b>{rangeLabel(peak)}</b> · {fmt(peak.total)} cases</span>}
+            {slow && slow.idx !== peak?.idx && <span style={{ color: T.coral }}>Worst <b>{rangeLabel(slow)}</b> · {fmt(slow.total)} cases</span>}
           </div>
         </>
       )}
@@ -1221,6 +1239,14 @@ function TodayPanel({ data, now, userId, userRole, openComments, commentsRefresh
   const canEdit = userRole && userRole !== "viewer";
   const hasTodayEntry = !!todayEntry;
 
+  // Show whichever is higher: the stored (synced) total or the live flavor sum.
+  // Production only climbs during the day, so the higher number is the fresher
+  // one — this keeps the headline current between syncs, no extra calls.
+  const liveL1 = prodByLine["1"].reduce((s, p) => s + (p.cases || 0), 0);
+  const liveL2 = prodByLine["2"].reduce((s, p) => s + (p.cases || 0), 0);
+  const shownL1 = Math.max(todayEntry?.line1_produced || 0, liveL1);
+  const shownL2 = Math.max(todayEntry?.line2_produced || 0, liveL2);
+
   const saveStart = async (line, value) => {
     if (!hasTodayEntry) return;
     setSaving(line);
@@ -1292,15 +1318,15 @@ function TodayPanel({ data, now, userId, userRole, openComments, commentsRefresh
           <div style={{ display: "flex", alignItems: "baseline", gap: 22, flexWrap: "wrap" }}>
             <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
               <span style={{ fontSize: 12, fontWeight: 700, color: T.teal, fontFamily: "var(--mono)" }}>L1</span>
-              <span style={{ fontSize: 36, fontWeight: 800, color: T.teal, fontFamily: "var(--mono)", lineHeight: 1, letterSpacing: -1 }}>{fmt(todayEntry.line1_produced || 0)}</span>
+              <span style={{ fontSize: 36, fontWeight: 800, color: T.teal, fontFamily: "var(--mono)", lineHeight: 1, letterSpacing: -1 }}>{fmt(shownL1)}</span>
             </div>
             <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
               <span style={{ fontSize: 12, fontWeight: 700, color: T.coral, fontFamily: "var(--mono)" }}>L2</span>
-              <span style={{ fontSize: 36, fontWeight: 800, color: T.coral, fontFamily: "var(--mono)", lineHeight: 1, letterSpacing: -1 }}>{fmt(todayEntry.line2_produced || 0)}</span>
+              <span style={{ fontSize: 36, fontWeight: 800, color: T.coral, fontFamily: "var(--mono)", lineHeight: 1, letterSpacing: -1 }}>{fmt(shownL2)}</span>
             </div>
             <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginLeft: "auto" }}>
               <span style={{ fontSize: 12, fontWeight: 700, color: T.textMid, fontFamily: "var(--mono)" }}>TOTAL</span>
-              <span style={{ fontSize: 36, fontWeight: 800, color: T.text, fontFamily: "var(--mono)", lineHeight: 1, letterSpacing: -1 }}>{fmt((todayEntry.line1_produced || 0) + (todayEntry.line2_produced || 0))}</span>
+              <span style={{ fontSize: 36, fontWeight: 800, color: T.text, fontFamily: "var(--mono)", lineHeight: 1, letterSpacing: -1 }}>{fmt(shownL1 + shownL2)}</span>
             </div>
           </div>
 
