@@ -260,10 +260,150 @@ function DualGauge({ eff, rHr, rMin, label, colorA, size = 115 }) {
   );
 }
 
-// Plant-local "HH:MM" straight out of the backend ISO string (…T09:00:00-04:00),
-// sliced rather than Date-parsed so it stays in plant time regardless of the
-// viewer's browser timezone.
-function isoHHMM(iso) { return iso ? iso.slice(11, 16) : null; }
+// Plant UTC offset in minutes straight off a backend ISO string (…-04:00).
+function isoOffsetMin(iso) {
+  const m = /([+-])(\d{2}):(\d{2})$/.exec(iso || "");
+  return m ? (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0;
+}
+// Absolute minutes on the PLANT clock. Absolute (not mod-24h) so the 5 AM hour
+// at each end of the 05:30→05:30 window stays two separate columns; shifted into
+// plant time so clock boundaries land on :00/:15/:30 regardless of the viewer's
+// browser timezone.
+function plantMin(iso, offMin) { return iso ? Math.round(Date.parse(iso) / 60000) + offMin : null; }
+function minToHHMM(t) {
+  const x = ((t % 1440) + 1440) % 1440;
+  return `${String(Math.floor(x / 60)).padStart(2, "0")}:${String(x % 60).padStart(2, "0")}`;
+}
+
+// Step a YYYY-MM-DD by whole days. Anchored at noon so a DST change can't
+// bump the result onto the wrong date.
+function addDays(dateStr, n) {
+  const d = new Date(dateStr + "T12:00:00");
+  d.setDate(d.getDate() + n);
+  return localDateStr(d);
+}
+function daysBetween(a, b) {
+  return Math.round((new Date(b + "T12:00:00") - new Date(a + "T12:00:00")) / 86400000);
+}
+
+// Day picker for everything below it: prev/next arrows for walking days one at a
+// time, a calendar for jumping, and a Today shortcut. Never goes past the
+// current production day — there's nothing to show there.
+function DateNav({ date, onChange, maxDate, hasData }) {
+  if (!date) return null;
+  const atToday = date === maxDate;
+  const back = daysBetween(date, maxDate);
+  const step = (n) => { const v = addDays(date, n); if (v <= maxDate) onChange(v); };
+  const btn = (disabled) => ({
+    display: "inline-flex", alignItems: "center", gap: 5, padding: "7px 12px",
+    background: disabled ? "transparent" : T.inputBg, border: `1px solid ${T.inputBorder}`,
+    borderRadius: 6, color: disabled ? T.textFaint : T.text, fontFamily: "var(--mono)",
+    fontSize: 12, fontWeight: 600, cursor: disabled ? "default" : "pointer", whiteSpace: "nowrap",
+  });
+  return (
+    <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 14px",
+      marginBottom: 18, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+      <button type="button" onClick={() => step(-1)} style={btn(false)} title="Previous day">‹ Prev</button>
+      <div style={{ textAlign: "center", minWidth: 190 }}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: T.text, fontFamily: "var(--mono)" }}>
+          {new Date(date + "T12:00:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
+        </div>
+        <div style={{ fontSize: 10, color: atToday ? T.teal : T.textMid, fontFamily: "var(--mono)", marginTop: 2 }}>
+          {atToday ? "Today · live" : back === 1 ? "Yesterday" : `${back} days ago`}
+          {!hasData && <span style={{ color: T.gold }}> · nothing logged</span>}
+        </div>
+      </div>
+      <button type="button" onClick={() => step(1)} disabled={atToday} style={btn(atToday)} title="Next day">Next ›</button>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
+        <input type="date" value={date} max={maxDate}
+          onChange={e => { const v = e.target.value; if (v && v <= maxDate) onChange(v); }}
+          style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, borderRadius: 6, color: T.text,
+            padding: "6px 9px", fontSize: 12, fontFamily: "var(--mono)", outline: "none", cursor: "pointer" }} />
+        <button type="button" onClick={() => onChange(maxDate)} disabled={atToday} style={btn(atToday)}>Today</button>
+      </div>
+    </div>
+  );
+}
+
+// Finest grain we ask the backend for; every view is rolled up from it.
+const RAW_BUCKET_MIN = 15;
+
+// Shift 1 starts 06:00 and every shift is 10 hours, so Shift 1 = 6 AM–4 PM and
+// Shift 2 = 4 PM–2 AM. The two blocks together are exactly the 20h window the
+// pace gauges use, which is why a shift's capacity is half the line's rated
+// daily capacity.
+const SHIFT_START_MIN = 6 * 60;
+const SHIFT_LEN_MIN = 10 * 60;
+
+// One shift's panel: cases made, how much of the shift's capacity that used,
+// the per-line split, and what ran. An unfinished shift is judged only against
+// the minutes elapsed so far, never the full 10h.
+function ShiftPanel({ shift, openMin, capPerMin, lines, running }) {
+  const cap = lines.reduce((s, L) => s + capPerMin(L.key) * openMin, 0);
+  const pct = cap > 0 ? Math.round((shift.total / cap) * 100) : null;
+  const rate = openMin > 0 ? shift.total / (openMin / 60) : null;
+  const bestHr = [...shift.hours.entries()].sort((a, b) => b[1] - a[1])[0];
+  // One row per line, in the same order as the line rows above — the grouping
+  // says which line it was, so the rows don't need an L1/L2 label.
+  const prodRows = lines
+    .map(L => [...(shift.prods[L.key] || new Map()).entries()].sort((a, b) => b[1] - a[1]))
+    .filter(r => r.length > 0);
+  const notStarted = openMin === 0;
+  return (
+    <div style={{ border: `1px solid ${running ? T.teal : T.border}`, borderRadius: 10, padding: "12px 14px",
+      background: running ? T.tealBg : T.gaugeInnerBg }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", fontFamily: "var(--mono)", color: T.text }}>
+          {shift.label}
+        </span>
+        <span style={{ fontSize: 10, color: T.textMid, fontFamily: "var(--mono)" }}>
+          {shift.window}{running ? " · running" : ""}
+        </span>
+      </div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
+        <span style={{ fontSize: 24, fontWeight: 800, fontFamily: "var(--mono)", color: T.text }}>{fmt(shift.total)}</span>
+        <span style={{ fontSize: 11, color: T.textMid }}>cases</span>
+        {pct != null && (
+          <span style={{ marginLeft: "auto", fontSize: 16, fontWeight: 800, fontFamily: "var(--mono)", color: perfColor(pct) }}
+            title={`${fmt(shift.total)} of ${fmt(Math.round(cap))} possible in ${running ? "the hours run so far" : "this shift"}`}>
+            {pct}%
+          </span>
+        )}
+      </div>
+      {notStarted ? (
+        <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic" }}>Hasn't started yet.</div>
+      ) : (
+        <>
+          {lines.map(L => {
+            const made = L.key === "1" ? shift.L1 : shift.L2;
+            const lc = capPerMin(L.key) * openMin;
+            const lp = lc > 0 && made > 0 ? Math.round((made / lc) * 100) : null;
+            return (
+              <div key={L.key} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontFamily: "var(--mono)", marginBottom: 3 }}
+                title={`${L.label}: ${fmt(made)}${lc > 0 ? ` of ${fmt(Math.round(lc))} possible` : ""}`}>
+                <span style={{ width: 9, height: 9, background: L.color, borderRadius: 2, flex: "0 0 auto" }} />
+                <span style={{ color: T.textMid }}>{L.label}</span>
+                <b style={{ color: L.color, marginLeft: "auto" }}>{fmt(made)}</b>
+                <span style={{ color: lp != null ? perfColor(lp) : T.textFaint, width: 34, textAlign: "right" }}>{lp != null ? `${lp}%` : "—"}</span>
+              </div>
+            );
+          })}
+          <div style={{ fontSize: 10, color: T.textMid, fontFamily: "var(--mono)", marginTop: 7 }}>
+            {rate != null ? `${fmt(Math.round(rate))} cases/hr` : "—"}
+            {bestHr ? ` · best hour ${formatTime12(minToHHMM(bestHr[0]))} (${fmt(bestHr[1])})` : ""}
+          </div>
+          {prodRows.length > 0 && (
+            <div style={{ fontSize: 11, color: "#000", fontWeight: 600, marginTop: 5, lineHeight: 1.5 }}>
+              {prodRows.map((row, i) => (
+                <div key={i}>{row.map(([n, c]) => `${n} ${fmt(c)}`).join(" · ")}</div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
 
 // Today's per-product breakdown + a time-bucketed (60/30/15-min) case timeline,
 // pulled live from the inventory backend via the `production-detail` edge
@@ -274,12 +414,16 @@ function ProductionDetail({ date, isToday, caps }) {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(null);
 
+  // Always pull the FINEST grain (15 min) and roll it up on the client. The
+  // backend buckets from 05:30, so its 60-min buckets run 5:30–6:30; its 15-min
+  // buckets land on :00/:15/:30/:45, which we can re-bucket onto real clock
+  // hours (6–7, 7–8, …). Also means switching 1hr/30/15 needs no refetch.
   useEffect(() => {
     if (!date) return;
     let cancelled = false;
     setLoading(true); setErr(null);
     supabase.functions
-      .invoke("production-detail", { body: { date, bucket_minutes: bucket } })
+      .invoke("production-detail", { body: { date, bucket_minutes: RAW_BUCKET_MIN } })
       .then(({ data: res, error }) => {
         if (cancelled) return;
         if (error || res?.error) { setErr(error?.message || res?.error); setData(null); }
@@ -287,7 +431,7 @@ function ProductionDetail({ date, isToday, caps }) {
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [date, bucket, isToday]);
+  }, [date, isToday]);
 
   // Roll the per-(line,product) rows up to one entry per product.
   const products = (() => {
@@ -302,84 +446,78 @@ function ProductionDetail({ date, isToday, caps }) {
     return [...m.values()].sort((a, b) => b.cases - a.cases);
   })();
 
-  // Dense bucket array 0..maxIdx (fill gaps with zero so a dead window shows as
-  // an empty bar, not a missing one) with L1/L2 split.
+  // --- Clock-aligned buckets -------------------------------------------------
+  // Columns are real clock windows (6–7, 7–8, …), NOT offsets from the backend's
+  // 05:30 window start. The run is the two 10h shifts — 6 AM → 2 AM, exactly the
+  // 20h the capacity is rated over — so every column is a whole hour worth of
+  // capacity. Columns extend past that only where something was actually
+  // scanned; the ends are never padded with empty ones.
+  const off = isoOffsetMin(data?.window_start);
+  const winS = plantMin(data?.window_start, off);
+  const winE = plantMin(data?.window_end, off);
+  const nowM = plantMin(data?.as_of, off);
+
   const buckets = (() => {
-    const rows = data?.timeline || [];
-    if (!rows.length) return [];
-    const byIdx = new Map();
-    let maxIdx = 0;
-    for (const r of rows) {
-      const idx = r.bucket_index;
-      maxIdx = Math.max(maxIdx, idx);
-      const b = byIdx.get(idx) || { idx, start: r.bucket_start, L1: 0, L2: 0, total: 0 };
-      if (r.line_number === "1") b.L1 += r.cases; else if (r.line_number === "2") b.L2 += r.cases;
-      b.total += r.cases;
-      byIdx.set(idx, b);
+    if (winS == null || winE == null || winE <= winS) return [];
+    // Bucket every row first, so the span can be widened to cover stray scans.
+    const hit = new Map();
+    for (const r of data?.timeline || []) {
+      const slot = Math.floor(plantMin(r.bucket_start, off) / bucket);
+      const e = hit.get(slot) || { L1: 0, L2: 0, total: 0 };
+      const c = r.cases || 0;
+      if (r.line_number === "1") e.L1 += c; else if (r.line_number === "2") e.L2 += c;
+      e.total += c;
+      hit.set(slot, e);
     }
-    const bmin = data?.bucket_minutes || bucket;
-    // Build gap-bucket starts from the window's plant-local HH:MM so their
-    // labels line up with the backend's (only chars 11–16 are ever read). Offset
-    // is carried through verbatim; the calendar date is irrelevant to the label.
-    const winIso = data?.window_start || "";
-    const winHHMM = isoHHMM(winIso) || "05:30";
-    const winOffset = winIso.length >= 6 ? winIso.slice(-6) : "+00:00";
-    const baseMin = (() => { const [h, m] = winHHMM.split(":").map(Number); return h * 60 + m; })();
-    const synthStart = (i) => {
-      const t = (baseMin + i * bmin) % (24 * 60);
-      const hh = String(Math.floor(t / 60)).padStart(2, "0"), mm = String(t % 60).padStart(2, "0");
-      return `2000-01-01T${hh}:${mm}:00${winOffset}`;
-    };
-    // Render the WHOLE production-day window (05:30 → next-day 05:30), not just
-    // up to the last scan — empty hours show as gray capacity slots.
-    const lastIdx = Math.max(maxIdx, data?.num_buckets ? data.num_buckets - 1 : maxIdx);
+    const runStart = Math.floor(winS / 1440) * 1440 + SHIFT_START_MIN; // 06:00
+    const runEnd = runStart + 2 * SHIFT_LEN_MIN;                       // 02:00 next day
+    let first = Math.floor(runStart / bucket), last = Math.ceil(runEnd / bucket) - 1;
+    for (const s of hit.keys()) { first = Math.min(first, s); last = Math.max(last, s); }
     const out = [];
-    for (let i = 0; i <= lastIdx; i++) {
-      const b = byIdx.get(i);
-      if (b) { out.push(b); continue; }
-      out.push({ idx: i, start: synthStart(i), L1: 0, L2: 0, total: 0, synth: true });
+    for (let s = first; s <= last; s++) {
+      const bs = s * bucket, e = hit.get(s);
+      out.push({
+        idx: s - first, slot: s, startMin: bs, endMin: bs + bucket,
+        hhmm: minToHHMM(bs), endHHMM: minToHHMM(bs + bucket),
+        L1: e?.L1 || 0, L2: e?.L2 || 0, total: e?.total || 0,
+      });
     }
     return out;
   })();
 
-  const bmin = data?.bucket_minutes || bucket;
   const LINES = [
     { key: "1", label: "Line I", color: T.teal },
     { key: "2", label: "Line II", color: T.coral },
   ];
   const dayProd = { "1": 0, "2": 0 };
   buckets.forEach(b => { dayProd["1"] += b.L1; dayProd["2"] += b.L2; });
-  // Capacity for one bucket = the line's rated daily capacity spread evenly over
-  // the 20h production run (same window the pace gauges use).
-  const capPerBucket = (k) => (caps?.[k] || 0) * bmin / PACE_WINDOW_MIN;
+  // Capacity per minute of the 20h run (same window the pace gauges use).
+  const capPerMin = (k) => (caps?.[k] || 0) / PACE_WINDOW_MIN;
   // Show every line with capacity or production — an idle line still appears as
   // an empty gray capacity slot, so you can see it didn't run.
-  let shownLines = LINES.filter(L => capPerBucket(L.key) > 0 || dayProd[L.key] > 0);
+  let shownLines = LINES.filter(L => capPerMin(L.key) > 0 || dayProd[L.key] > 0);
   if (!shownLines.length) shownLines = LINES;
-  const hasCap = shownLines.some(L => capPerBucket(L.key) > 0);
+  const hasCap = shownLines.some(L => capPerMin(L.key) > 0);
 
-  // Scale bar heights by the tallest produced value or per-bucket capacity so
+  // A window is "current" while now sits inside it and the day is still running.
+  const isCurrent = (b) => nowM != null && nowM >= b.startMin && nowM < b.endMin && nowM < winE;
+  const isComplete = (b) => nowM == null || b.endMin <= nowM || nowM >= winE;
+  // Minutes of this window the plant could actually have been producing in:
+  // clipped to the production window, and to "now" for the in-progress one.
+  const openMin = (b) => {
+    const lo = Math.max(b.startMin, winS);
+    let hi = Math.min(b.endMin, winE);
+    if (nowM != null && nowM < hi) hi = Math.max(lo, nowM);
+    return Math.max(0, hi - lo);
+  };
+  // Gray ceiling = everything this window could hold (so future hours still show
+  // their slot); the % denominator only counts minutes already elapsed.
+  const capFull = (b, k) => capPerMin(k) * Math.max(0, Math.min(b.endMin, winE) - Math.max(b.startMin, winS));
+  const capSoFar = (b, k) => capPerMin(k) * openMin(b);
+
+  // Scale bar heights by the tallest produced value or full-window capacity so
   // the gray capacity "ceiling" and the solid "made" fill are comparable.
-  const maxBar = Math.max(1, ...buckets.map(b => Math.max(b.L1, b.L2)), ...shownLines.map(L => capPerBucket(L.key)));
-
-  // Which bucket is "now" (in progress) and how far into it we are, so the
-  // current hour is judged only against the minutes elapsed — not the whole
-  // hour — and never flagged worst while it's still running.
-  const asOf = data?.as_of ? new Date(data.as_of) : null;
-  const winStart = data?.window_start ? new Date(data.window_start) : null;
-  let nowIdx = null, nowFrac = 1;
-  if (asOf && winStart) {
-    const elapsedMin = (asOf - winStart) / 60000;
-    if (elapsedMin >= 0) { nowIdx = Math.floor(elapsedMin / bmin); nowFrac = Math.min(1, Math.max(0.05, (elapsedMin - nowIdx * bmin) / bmin)); }
-  }
-  const isCurrent = (b) => nowIdx != null && b.idx === nowIdx;
-  const isComplete = (b) => nowIdx == null || b.idx < nowIdx;
-  const capFrac = (b) => (isCurrent(b) ? nowFrac : 1); // prorate the in-progress window
-
-  // Headline % for a window = cases made ÷ capacity of the line(s) RUNNING that
-  // window (prorated to elapsed time for the current, in-progress window).
-  const runCap = (b) => shownLines.reduce((s, L) => s + (((L.key === "1" ? b.L1 : b.L2) > 0) ? capPerBucket(L.key) * capFrac(b) : 0), 0);
-  const utilPct = (b) => { const rc = runCap(b); return rc > 0 ? Math.round((b.total / rc) * 100) : null; };
+  const maxBar = Math.max(1, ...buckets.map(b => Math.max(b.L1, b.L2)), ...shownLines.map(L => capPerMin(L.key) * bucket));
 
   // Best / worst over COMPLETE windows only (skip the in-progress current hour
   // and anything future).
@@ -390,24 +528,71 @@ function ProductionDetail({ date, isToday, caps }) {
   const peak = span.length ? span.reduce((a, b) => (b.total > a.total ? b : a)) : null;
   const slow = span.length ? span.reduce((a, b) => (b.total < a.total ? b : a)) : null;
   const totalCases = products.reduce((s, p) => s + p.cases, 0);
+  // The bars come from timestamped pallet scans; the product chips come from the
+  // day's pallet totals. Some pallets reach the backend with no usable scan time,
+  // so the bars can add up to LESS than the chips — say so instead of letting the
+  // two numbers silently disagree.
+  const barCases = dayProd["1"] + dayProd["2"];
+  const untimed = Math.max(0, totalCases - barCases);
+
+  // --- Shift 1 / Shift 2 -----------------------------------------------------
+  // Built from the same 15-min rows as the bars. Each shift is RATED for 10h
+  // (6 AM–4 PM, 4 PM–2 AM) but COLLECTS wider than that, so the two together
+  // cover the whole 05:30→05:30 production day and no scan is ever orphaned:
+  // Shift 2 keeps anything its crew scans past 2 AM (overtime / late close-out),
+  // and Shift 1 likewise picks up a start before 6 AM. Capacity stays the rated
+  // 10h, so overtime reads as a real over-100% instead of quietly vanishing.
+  const shiftSplit = (() => {
+    if (winS == null || winE == null) return null;
+    const midnight = Math.floor(winS / 1440) * 1440; // 00:00 of the window's own day
+    const s1Start = midnight + SHIFT_START_MIN;
+    const s2Start = s1Start + SHIFT_LEN_MIN;
+    const s2End = s2Start + SHIFT_LEN_MIN;
+    const mk = (label, nomStart, nomEnd, binStart, binEnd) => ({
+      label, nomStart, nomEnd, binStart, binEnd,
+      window: `${formatTime12(minToHHMM(nomStart))}–${formatTime12(minToHHMM(nomEnd))}`,
+      L1: 0, L2: 0, total: 0, prods: { "1": new Map(), "2": new Map() }, hours: new Map(),
+    });
+    const list = [
+      mk("Shift 1", s1Start, s2Start, Math.min(winS, s1Start), s2Start),
+      mk("Shift 2", s2Start, s2End, s2Start, Math.max(winE, s2End)),
+    ];
+    for (const r of data?.timeline || []) {
+      const m = plantMin(r.bucket_start, off);
+      const s = list.find(x => m >= x.binStart && m < x.binEnd) || list[1];
+      const c = r.cases || 0;
+      if (r.line_number === "1") s.L1 += c; else if (r.line_number === "2") s.L2 += c;
+      s.total += c;
+      // Kept per line, so each line's products list on its own row.
+      const pn = r.product_name || r.short_code || "Unknown";
+      const pm = s.prods[r.line_number];
+      if (pm) pm.set(pn, (pm.get(pn) || 0) + c);
+      const hr = Math.floor(m / 60) * 60;
+      s.hours.set(hr, (s.hours.get(hr) || 0) + c);
+    }
+    return { list };
+  })();
+  // Minutes of a shift the plant could have been producing in — the RATED 10h,
+  // clipped to the production window and to "now" for a shift still under way.
+  const shiftOpenMin = (s) => {
+    const lo = Math.max(s.nomStart, winS);
+    let hi = Math.min(s.nomEnd, winE);
+    if (nowM != null && nowM < hi) hi = Math.max(lo, nowM);
+    return Math.max(0, hi - lo);
+  };
+  // "Running" spans the collecting window, so a crew still scanning at 3 AM
+  // still reads as on shift.
+  const shiftRunning = (s) => nowM != null && nowM >= s.binStart && nowM < s.binEnd && nowM < winE;
 
   // Before the edge function / inventory endpoint are deployed the invoke
   // errors — hide the whole card rather than show a red error to live users.
   // Once the backend is up it renders normally.
   if (!loading && err && products.length === 0 && buckets.length === 0) return null;
 
-  const rangeLabel = (b) => {
-    if (!b?.start) return "—";
-    const startHHMM = isoHHMM(b.start);
-    const bmin = data?.bucket_minutes || bucket;
-    // derive end HH:MM from start + bucket minutes, in plant-local time
-    const [h, mi] = startHHMM.split(":").map(Number);
-    const endTot = (h * 60 + mi + bmin) % (24 * 60);
-    const eh = String(Math.floor(endTot / 60)).padStart(2, "0"), em = String(endTot % 60).padStart(2, "0");
-    return `${formatTime12(startHHMM)}–${formatTime12(`${eh}:${em}`)}`;
-  };
+  const rangeLabel = (b) => b ? `${formatTime12(b.hhmm)}–${formatTime12(b.endHHMM)}` : "—";
 
   return (
+    <>
     <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16, marginBottom: 18 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
         <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>
@@ -452,10 +637,15 @@ function ProductionDetail({ date, isToday, caps }) {
         <>
           {hasCap && (
             <div style={{ fontSize: 11, color: T.textMid, marginBottom: 10, lineHeight: 1.4 }}>
-              Each bar is one {bucket === 60 ? "hour" : `${bucket}-min window`}, one bar per line. The <b style={{ color: T.text }}>%</b> above each bar is how much of <b style={{ color: T.text }}>that line's</b> capacity it used —{" "}
+              The run is <b style={{ color: T.text }}>6 AM → 2 AM</b> — two 10 h shifts, the same 20 h the capacity is rated over — so each bar is {bucket === 60 ? "one clock hour (6–7, 7–8, …) worth" : `${bucket} min`} of capacity, one bar per line. The number under each bar is what <b style={{ color: T.text }}>that line</b> made; the <b style={{ color: T.text }}>%</b> above it is how much of that line's capacity it used —{" "}
               <span style={{ color: T.teal, fontWeight: 700 }}>green = strong</span>,{" "}
               <span style={{ color: T.gold, fontWeight: 700 }}>amber = watch</span>,{" "}
               <span style={{ color: T.coral, fontWeight: 700 }}>red = slow</span>. Gray = full capacity.
+            </div>
+          )}
+          {untimed > 0 && (
+            <div style={{ fontSize: 11, color: T.gold, marginBottom: 10, lineHeight: 1.4 }}>
+              Bars add up to <b>{fmt(barCases)}</b> of the day's <b>{fmt(totalCases)}</b> cases — {fmt(untimed)} came through without a scan time, so they're in the product totals above but not in any hour below.
             </div>
           )}
           <div style={{ display: "flex", alignItems: "flex-end", gap: bucket === 60 ? 8 : 4, overflowX: "auto", paddingBottom: 4 }}>
@@ -464,11 +654,11 @@ function ProductionDetail({ date, isToday, caps }) {
               const isSlow = !cur && slow && b.idx === slow.idx;
               const isPeak = !cur && peak && b.idx === peak.idx;
               const barW = bucket === 15 ? 10 : bucket === 30 ? 14 : 22;
-              const showLbl = bucket === 60 || b.idx % (60 / bucket) === 0;
+              const showLbl = bucket === 60 || b.startMin % 60 === 0;
               const H = 100;
               const cTime = (hhmm) => formatTime12(hhmm).replace(":00", "").replace(" AM", "a").replace(" PM", "p");
               return (
-                <div key={b.idx} title={`${rangeLabel(b)}${cur ? " (in progress)" : ""} — made ${fmt(b.total)} cases`}
+                <div key={b.idx} title={`${rangeLabel(b)}${cur ? " (in progress)" : ""} — made ${fmt(b.total)} cases${shownLines.length > 1 ? ` (L1 ${fmt(b.L1)} + L2 ${fmt(b.L2)})` : ""}`}
                   style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: "0 0 auto",
                     padding: "3px 3px", borderRadius: 6,
                     background: isSlow ? "rgba(217,74,66,0.08)" : isPeak ? "rgba(14,153,144,0.08)" : cur ? "rgba(14,153,144,0.05)" : "transparent" }}>
@@ -476,12 +666,12 @@ function ProductionDetail({ date, isToday, caps }) {
                   <div style={{ display: "flex", alignItems: "flex-end", gap: 2 }}>
                     {shownLines.map(L => {
                       const prod = L.key === "1" ? b.L1 : b.L2;
-                      const cap = capPerBucket(L.key) * capFrac(b);
+                      const cap = capSoFar(b, L.key), capMax = capFull(b, L.key);
                       const lu = (prod > 0 && cap > 0) ? Math.round((prod / cap) * 100) : null;
                       const ph = prod > 0 ? Math.max(3, (prod / maxBar) * H) : 0;
-                      const ch = cap > 0 ? (cap / maxBar) * H : 0;
+                      const ch = capMax > 0 ? (capMax / maxBar) * H : 0;
                       return (
-                        <div key={L.key} title={`${L.label} ${rangeLabel(b)}${cur ? " (in progress)" : ""}: made ${fmt(prod)}${cap > 0 ? ` of ${fmt(Math.round(cap))}${cur ? " so far" : ""} (${lu ?? 0}%)` : ""}`}
+                        <div key={L.key} title={`${L.label} ${rangeLabel(b)}${cur ? " (in progress)" : ""}: made ${fmt(prod)}${cap > 0 ? ` of ${fmt(Math.round(cap))} possible${cur ? " so far" : ""} (${lu ?? 0}%)` : ""}`}
                           style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end" }}>
                           {bucket === 60 && (
                             <div style={{ fontSize: 10, fontWeight: 800, fontFamily: "var(--mono)", color: lu != null ? perfColor(lu) : T.textFaint, height: 16, lineHeight: "16px", opacity: cur ? 0.7 : 1 }}>
@@ -492,18 +682,25 @@ function ProductionDetail({ date, isToday, caps }) {
                             {ch > 0 && <div style={{ position: "absolute", bottom: 0, left: 0, width: barW, height: ch, background: T.gaugeBg, borderRadius: "3px 3px 0 0" }} />}
                             <div style={{ position: "relative", width: barW, height: ph, background: L.color, borderRadius: "3px 3px 0 0", opacity: cur ? 0.7 : 1 }} />
                           </div>
+                          {/* cases made by THIS line in this window, in the line's own color */}
+                          {bucket === 60 && (
+                            <div style={{ fontSize: 9, fontWeight: 700, fontFamily: "var(--mono)", color: L.color, height: 11, opacity: cur ? 0.7 : 1 }}>
+                              {prod > 0 ? fmt(prod) : ""}
+                            </div>
+                          )}
                         </div>
                       );
                     })}
                   </div>
                   {/* time window */}
-                  <div style={{ fontSize: 9, color: cur ? T.teal : T.textMid, fontWeight: cur ? 700 : 400, fontFamily: "var(--mono)", marginTop: 4, whiteSpace: "nowrap", height: 11 }}>
-                    {cur ? "now" : (showLbl ? cTime(isoHHMM(b.start)) : "")}
+                  <div style={{ fontSize: 9, color: cur ? T.teal : T.textMid, fontWeight: cur ? 700 : 400, fontFamily: "var(--mono)", marginTop: 3, whiteSpace: "nowrap", height: 11 }}>
+                    {cur ? "now" : (showLbl ? cTime(b.hhmm) : "")}
                   </div>
-                  {/* concrete cases made, combined (1-hr view has room) */}
+                  {/* both lines running → spell out the combined figure so the
+                      per-line numbers above are never mistaken for a total */}
                   {bucket === 60 && (
                     <div style={{ fontSize: 8, color: T.textLight, fontFamily: "var(--mono)", height: 10 }}>
-                      {b.total > 0 ? fmt(b.total) : ""}
+                      {b.L1 > 0 && b.L2 > 0 ? `Σ ${fmt(b.total)}` : ""}
                     </div>
                   )}
                 </div>
@@ -513,9 +710,10 @@ function ProductionDetail({ date, isToday, caps }) {
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 10, fontSize: 11, fontFamily: "var(--mono)", color: T.textMid, alignItems: "center" }}>
             {shownLines.map(L => (
               <span key={L.key} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-                <span style={{ width: 10, height: 10, background: L.color, borderRadius: 2 }} /> {L.label} made
+                <span style={{ width: 10, height: 10, background: L.color, borderRadius: 2 }} /> {L.label} made <b style={{ color: L.color }}>{fmt(dayProd[L.key])}</b>
               </span>
             ))}
+            {shownLines.length > 1 && <span>both lines <b style={{ color: T.text }}>{fmt(barCases)}</b></span>}
             {hasCap && <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><span style={{ width: 10, height: 10, background: T.gaugeBg, borderRadius: 2 }} /> capacity</span>}
             {peak && <span style={{ color: T.teal }}>Best <b>{rangeLabel(peak)}</b> · {fmt(peak.total)} cases</span>}
             {slow && slow.idx !== peak?.idx && <span style={{ color: T.coral }}>Worst <b>{rangeLabel(slow)}</b> · {fmt(slow.total)} cases</span>}
@@ -523,6 +721,38 @@ function ProductionDetail({ date, isToday, caps }) {
         </>
       )}
     </div>
+
+    {/* Shift 1 (6 AM–4 PM) vs Shift 2 (4 PM–2 AM), from the same scan data. */}
+    {shiftSplit && barCases > 0 && (
+      <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16, marginBottom: 18 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+          <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>
+            Shift Split
+            <span style={{ color: T.textMid, fontWeight: 600, textTransform: "none", letterSpacing: 0 }}>
+              {untimed > 0 ? ` · ${fmt(barCases)} of ${fmt(totalCases)} cases placed` : ` · ${fmt(barCases)} cases`}
+            </span>
+          </div>
+          <div style={{ fontSize: 10, color: T.textLight, fontFamily: "var(--mono)" }}>
+            10h shift
+          </div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 10 }}>
+          {shiftSplit.list.map(s => (
+            <ShiftPanel key={s.label} shift={s} openMin={shiftOpenMin(s)} capPerMin={capPerMin}
+              lines={shownLines} running={shiftRunning(s)} />
+          ))}
+        </div>
+        {/* Shift is read from the scan time, so a pallet with no scan time can't
+            be placed in one. Say the number plainly rather than implying it's
+            pending something. */}
+        {untimed > 0 && (
+          <div style={{ fontSize: 11, color: T.gold, marginTop: 10, lineHeight: 1.5 }}>
+            {fmt(untimed)} more cases have no scan time, so they can't be placed in a shift — the day's full total is {fmt(totalCases)}.
+          </div>
+        )}
+      </div>
+    )}
+    </>
   );
 }
 
@@ -2137,6 +2367,8 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
               )}
             </div>
           </div>
+
+          <DateNav date={selectedDate} onChange={setSelectedDate} maxDate={todayDateStr} hasData={!!selectedEntry} />
 
           {selectedDate && <ProductionDetail date={selectedDate} isToday={selectedDate === todayDateStr}
             caps={{ "1": selectedEntry?.line1_capacity || 0, "2": selectedEntry?.line2_capacity || 0 }} />}
