@@ -414,25 +414,44 @@ function ProductionDetail({ date, isToday, caps }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(null);
+  const [retrying, setRetrying] = useState(false);
+  const [reloadTick, setReloadTick] = useState(0);
 
   // Always pull the FINEST grain (15 min) and roll it up on the client. The
   // backend buckets from 05:30, so its 60-min buckets run 5:30–6:30; its 15-min
   // buckets land on :00/:15/:30/:45, which we can re-bucket onto real clock
   // hours (6–7, 7–8, …). Also means switching 1hr/30/15 needs no refetch.
+  //
+  // The inventory API behind this endpoint does blip — when it does it can hang
+  // until Cloudflare 502s it ~47s later. So: cap each attempt at 20s, retry
+  // twice quietly, and on give-up keep whatever was last loaded on screen with a
+  // warning instead of blanking the card.
   useEffect(() => {
     if (!date) return;
     let cancelled = false;
-    setLoading(true); setErr(null);
-    supabase.functions
-      .invoke("production-detail", { body: { date, bucket_minutes: RAW_BUCKET_MIN } })
-      .then(({ data: res, error }) => {
-        if (cancelled) return;
-        if (error || res?.error) { setErr(error?.message || res?.error); setData(null); }
-        else setData(res);
-      })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, [date, isToday]);
+    let retryTimer = null;
+    const run = async (attempt) => {
+      const ctrl = new AbortController();
+      const bail = setTimeout(() => ctrl.abort(), 20000);
+      let res = null, error = null;
+      try {
+        const out = await supabase.functions.invoke("production-detail", {
+          body: { date, bucket_minutes: RAW_BUCKET_MIN }, signal: ctrl.signal,
+        });
+        res = out.data; error = out.error || res?.error || null;
+      } catch (e) { error = e; }
+      clearTimeout(bail);
+      if (cancelled) return;
+      if (!error) { setData(res); setErr(null); setRetrying(false); setLoading(false); return; }
+      if (attempt < 2) { setRetrying(true); retryTimer = setTimeout(() => run(attempt + 1), 4000); return; }
+      const msg = typeof error === "string" ? error : error?.message || "couldn't reach the inventory API";
+      setErr(msg.length > 140 ? `${msg.slice(0, 140)}…` : msg);
+      setRetrying(false); setLoading(false);
+    };
+    setLoading(true); setErr(null); setRetrying(false);
+    run(0);
+    return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
+  }, [date, isToday, reloadTick]);
 
   // Roll the per-(line,product) rows up to one entry per product.
   const products = (() => {
@@ -585,10 +604,8 @@ function ProductionDetail({ date, isToday, caps }) {
   // still reads as on shift.
   const shiftRunning = (s) => nowM != null && nowM >= s.binStart && nowM < s.binEnd && nowM < winE;
 
-  // Before the edge function / inventory endpoint are deployed the invoke
-  // errors — hide the whole card rather than show a red error to live users.
-  // Once the backend is up it renders normally.
-  if (!loading && err && products.length === 0 && buckets.length === 0) return null;
+  // Never hide the card on an error — a card that vanishes reads as "the feature
+  // broke" and hides the fact that the inventory API is the thing that's down.
 
   const rangeLabel = (b) => b ? `${formatTime12(b.hhmm)}–${formatTime12(b.endHHMM)}` : "—";
 
@@ -624,8 +641,26 @@ function ProductionDetail({ date, isToday, caps }) {
         </div>
       )}
 
-      {loading && <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic", padding: "8px 0" }}>Loading live production…</div>}
-      {err && <div style={{ fontSize: 11, color: T.coral, fontStyle: "italic", padding: "8px 0" }}>Couldn't load detail: {err}</div>}
+      {loading && (
+        <div style={{ fontSize: 11, color: retrying ? T.gold : T.textFaint, fontStyle: "italic", padding: "8px 0" }}>
+          {retrying ? "Inventory API isn't answering — retrying…" : "Loading live production…"}
+        </div>
+      )}
+      {err && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "9px 11px", marginBottom: 10,
+          background: T.coralBg, border: `1px solid ${T.border}`, borderRadius: 8 }}>
+          <span style={{ fontSize: 11, color: T.text, lineHeight: 1.45 }}>
+            <b style={{ color: T.coral }}>Can't reach the inventory API.</b>{" "}
+            {data ? "Showing the last numbers that loaded — they may be behind." : "The hourly and shift breakdowns need it; the totals above come from the last sync."}
+            <span style={{ color: T.textMid }}> ({err})</span>
+          </span>
+          <button type="button" onClick={() => setReloadTick(t => t + 1)}
+            style={{ marginLeft: "auto", padding: "5px 11px", borderRadius: 5, border: `1px solid ${T.inputBorder}`, background: "transparent",
+              color: T.text, fontSize: 11, fontWeight: 700, fontFamily: "var(--mono)", cursor: "pointer", whiteSpace: "nowrap" }}>
+            Retry
+          </button>
+        </div>
+      )}
 
       {!loading && !err && buckets.length === 0 && (
         <div style={{ fontSize: 11, color: T.textFaint, fontStyle: "italic", padding: "8px 0" }}>No scanned pallets to break down yet for this day.</div>
