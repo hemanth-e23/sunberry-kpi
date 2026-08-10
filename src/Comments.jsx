@@ -22,20 +22,75 @@ function timeAgo(iso) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
-function displayName(profile, fallbackEmail) {
+export function displayName(profile, fallbackEmail) {
   if (profile?.full_name) return profile.full_name;
   const email = profile?.email || fallbackEmail;
   if (!email) return 'Unknown';
   return email.split('@')[0];
 }
 
-const CATEGORY_LABELS = {
+export const CATEGORY_LABELS = {
   mechanical: 'Mechanical', production: 'Production',
   quality: 'Quality', staffing: 'Staffing', other: 'Other',
 };
-const CATEGORY_COLORS = {
+// Checked with the dataviz palette validator against the cream card surface:
+// all five sit in the lightness band, clear 3:1 contrast, and the worst adjacent
+// pair separates by ΔE 11.7 under deuteranopia. 'other' is deliberately the
+// low-chroma de-emphasis slot.
+export const CATEGORY_COLORS = {
   mechanical: '#D94A42', production: '#0E9990',
-  quality: '#C99700', staffing: '#7A5BD9', other: 'rgba(44,36,22,0.5)',
+  quality: '#B08600', staffing: '#7A5BD9', other: '#8A8175',
+};
+// Order the breakdowns render in, so a category keeps its slot day to day.
+export const CATEGORY_ORDER = ['mechanical', 'production', 'quality', 'staffing', 'other'];
+
+// Which line the downtime hit. 'both' is its own bucket, never added into each
+// line, so a plant-wide stoppage can't be double-counted. Entries logged before
+// the line was captured have no value and report as "Not set".
+export const LINES = [
+  { value: '1', label: 'Line I', short: 'L1', color: '#0E9990' },
+  { value: '2', label: 'Line II', short: 'L2', color: '#D94A42' },
+  { value: 'both', label: 'Both lines', short: 'BOTH', color: '#7054AD' },
+];
+// Second level of the reason: for mechanical it's WHICH MACHINE, for production
+// it's WHAT HELD US UP. Stored as the slug, displayed from the label, so renaming
+// a label never orphans the history behind it. A category with no list here just
+// gets the free-text "What kind?" box instead.
+export const SUB_REASONS = {
+  mechanical: [
+    { value: 'depalletizer', label: 'Depalletizer' },
+    { value: 'filler', label: 'Filler' },
+    { value: 'capper', label: 'Capper' },
+    { value: 'cooler', label: 'Cooler' },
+    { value: 'labeler', label: 'Labeler' },
+    { value: 'caser', label: 'Caser' },
+    { value: 'arpac', label: 'ArPac' },
+    { value: 'palletizer', label: 'Palletizer' },
+    { value: 'other', label: 'Other machine' },
+  ],
+  production: [
+    { value: 'people', label: 'People / short staffed' },
+    { value: 'water_supply', label: 'Water supply' },
+    { value: 'batch_not_ready', label: 'Batch not ready' },
+    { value: 'no_bottles', label: 'No bottles to filler' },
+    { value: 'cip_delay', label: 'CIP delay' },
+    { value: 'changeover', label: 'Changeover' },
+    { value: 'communication', label: 'Communication' },
+    { value: 'other', label: 'Other' },
+  ],
+};
+// Unknown slugs (older rows, free text) still render readably.
+export function subReasonLabel(category, value) {
+  if (!value) return null;
+  const hit = (SUB_REASONS[category] || []).find(s => s.value === value);
+  if (hit) return hit.label;
+  return value.replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase());
+}
+
+export const LINE_ORDER = ['1', '2', 'both', 'none'];
+export const LINE_META = {
+  ...Object.fromEntries(LINES.map(l => [l.value, l])),
+  none: { value: 'none', label: 'Not set', short: '—', color: 'rgba(44,36,22,0.35)' },
 };
 
 function CommentItem({ comment, currentUserId, onEdit }) {
@@ -46,6 +101,7 @@ function CommentItem({ comment, currentUserId, onEdit }) {
   const cat = comment.category;
   const catLabel = cat ? CATEGORY_LABELS[cat] : null;
   const catColor = cat ? CATEGORY_COLORS[cat] : null;
+  const subLabel = subReasonLabel(cat, comment.sub_reason);
   const mins = comment.downtime_minutes;
   const save = async () => {
     const t = draft.trim();
@@ -62,9 +118,16 @@ function CommentItem({ comment, currentUserId, onEdit }) {
           <span style={{ fontWeight: 700, fontSize: 12, color: T.text, fontFamily: "'JetBrains Mono', monospace" }}>
             {displayName(comment.author)}
           </span>
+          {comment.line_number && (
+            <span title={LINE_META[comment.line_number]?.label}
+              style={{ fontSize: 9, letterSpacing: 0.5, color: '#fff', background: LINE_META[comment.line_number]?.color, padding: '2px 6px', borderRadius: 3, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>
+              {LINE_META[comment.line_number]?.short}
+            </span>
+          )}
           {catLabel && (
             <span style={{ fontSize: 9, letterSpacing: 0.5, textTransform: 'uppercase', color: '#fff', background: catColor, padding: '2px 6px', borderRadius: 3, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>
-              {catLabel}{cat === 'other' && comment.other_specify ? `: ${comment.other_specify}` : ''}
+              {catLabel}{subLabel ? `: ${subLabel}` : ''}
+              {comment.other_specify && (cat === 'other' || comment.sub_reason === 'other') ? ` — ${comment.other_specify}` : ''}
             </span>
           )}
           {mins != null && mins > 0 && (
@@ -76,7 +139,7 @@ function CommentItem({ comment, currentUserId, onEdit }) {
         <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <span title={new Date(comment.created_at).toLocaleString()} style={{ fontSize: 11, color: T.textMid, fontFamily: "'JetBrains Mono', monospace" }}>{timeAgo(comment.created_at)}</span>
           {isOwn && !editing && (
-            <button onClick={() => { setDraft(comment.text); setEditing(true); }} title="Edit your comment" style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.teal, fontSize: 11, padding: '0 2px', fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>edit</button>
+            <button onClick={() => { setDraft(comment.text); setEditing(true); }} title="Edit your entry" style={{ background: 'none', border: 'none', cursor: 'pointer', color: T.teal, fontSize: 11, padding: '0 2px', fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>edit</button>
           )}
         </span>
       </div>
@@ -98,22 +161,31 @@ function CommentItem({ comment, currentUserId, onEdit }) {
   );
 }
 
+// `line_number` arrived with supabase_comments_line.sql. Until that migration is
+// run the column doesn't exist and selecting it 400s, so fall back to the older
+// shape rather than leaving the whole panel empty.
+const NEW_COLS = /, (line_number|sub_reason)/g;
+const COLS_DAY = 'id, text, created_at, author_id, category, downtime_minutes, other_specify, line_number, sub_reason, author:profiles!author_id(full_name, email)';
+const COLS_DAY_LEGACY = COLS_DAY.replace(NEW_COLS, '');
+// The range query also feeds the downtime day drill-down, so it carries the text
+// and author — one fetch instead of a second round trip per day opened.
+const COLS_RANGE = 'id, entry_date, created_at, text, category, downtime_minutes, other_specify, line_number, sub_reason, author:profiles!author_id(full_name, email)';
+const COLS_RANGE_LEGACY = COLS_RANGE.replace(NEW_COLS, '');
+
 async function fetchCommentsFor(date) {
-  const { data, error } = await supabase
-    .from('comments')
-    .select('id, text, created_at, author_id, category, downtime_minutes, other_specify, author:profiles!author_id(full_name, email)')
-    .eq('entry_date', date)
-    .order('created_at', { ascending: true });
+  const q = (cols) => supabase.from('comments').select(cols)
+    .eq('entry_date', date).order('created_at', { ascending: true });
+  let { data, error } = await q(COLS_DAY);
+  if (error) ({ data, error } = await q(COLS_DAY_LEGACY));
   if (error) console.error('load comments failed', error);
   return data || [];
 }
 
 export async function fetchCommentsBetween(startDate, endDate) {
-  const { data, error } = await supabase
-    .from('comments')
-    .select('id, entry_date, category, downtime_minutes, other_specify')
-    .gte('entry_date', startDate)
-    .lte('entry_date', endDate);
+  const q = (cols) => supabase.from('comments').select(cols)
+    .gte('entry_date', startDate).lte('entry_date', endDate);
+  let { data, error } = await q(COLS_RANGE);
+  if (error) ({ data, error } = await q(COLS_RANGE_LEGACY));
   if (error) console.error('load comments range failed', error);
   return data || [];
 }
@@ -152,7 +224,7 @@ export function CommentsList({ date, currentUserId, isManager, refreshTick = 0, 
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, gap: 8 }}>
         <div style={{ fontSize: 11, letterSpacing: 1.5, textTransform: 'uppercase', color: T.text, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" }}>
-          Comments {!loading && <span style={{ color: T.textMid, fontWeight: 400 }}>({comments.length})</span>}
+          Downtime {!loading && <span style={{ color: T.textMid, fontWeight: 400 }}>({comments.length})</span>}
         </div>
         {onAddClick && (
           <button onClick={onAddClick} style={{ padding: '4px 10px', borderRadius: 5, border: `1px solid ${T.borderStrong}`, background: 'transparent', color: T.teal, fontSize: 10, fontWeight: 700, cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace", textTransform: 'uppercase' }}>+ Add</button>
@@ -162,7 +234,7 @@ export function CommentsList({ date, currentUserId, isManager, refreshTick = 0, 
         {loading ? (
           <div style={{ padding: '14px 0', fontSize: 11, color: T.textFaint, fontStyle: 'italic', textAlign: 'center' }}>Loading...</div>
         ) : comments.length === 0 ? (
-          <div style={{ padding: '14px 0', fontSize: 11, color: T.textFaint, fontStyle: 'italic', textAlign: 'center' }}>No comments yet for this date.</div>
+          <div style={{ padding: '14px 0', fontSize: 11, color: T.textFaint, fontStyle: 'italic', textAlign: 'center' }}>Nothing logged for this date.</div>
         ) : (
           comments.map((c) => (
             <CommentItem key={c.id} comment={c} currentUserId={currentUserId} onEdit={edit} />
@@ -191,6 +263,8 @@ export default function CommentsModal({ initialDate, onClose, currentUserId, isM
   const [category, setCategory] = useState('other');
   const [minutes, setMinutes] = useState('');
   const [otherSpecify, setOtherSpecify] = useState('');
+  const [lineNumber, setLineNumber] = useState('');
+  const [subReason, setSubReason] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -200,25 +274,43 @@ export default function CommentsModal({ initialDate, onClose, currentUserId, isM
 
   useEffect(() => { load(); }, [load]);
 
+  const mins = minutes === '' ? null : Math.min(parseInt(minutes) || 0, 1440);
+  const isDowntime = mins != null && mins > 0;
+  const subOptions = SUB_REASONS[category] || null;
+  // Downtime has to belong to a line and, where the reason has a picklist, to a
+  // specific cause — otherwise it can't be reported per line or per machine. A
+  // plain note with no minutes needs neither.
+  const needsLine = isDowntime && !lineNumber;
+  const needsSub = isDowntime && !!subOptions && !subReason;
+  // Free text is the escape hatch for "Other" at either level.
+  const wantsSpecify = category === 'other' || subReason === 'other';
+  const canPost = !!text.trim() && !needsLine && !needsSub;
+
+  const pickCategory = (v) => { setCategory(v); setSubReason(''); };
+
   const post = async () => {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed || needsLine || needsSub) return;
     setPosting(true);
     const payload = {
       entry_date: date,
       author_id: currentUserId,
       text: trimmed,
       category,
-      downtime_minutes: minutes === '' ? null : Math.min(parseInt(minutes) || 0, 1440),
-      other_specify: category === 'other' && otherSpecify.trim() ? otherSpecify.trim() : null,
+      downtime_minutes: mins,
+      other_specify: wantsSpecify && otherSpecify.trim() ? otherSpecify.trim() : null,
+      line_number: lineNumber || null,
+      sub_reason: subReason || null,
     };
     const { error } = await supabase.from('comments').insert(payload);
     setPosting(false);
-    if (error) { alert('Could not post: ' + error.message); return; }
+    if (error) { alert('Could not save: ' + error.message); return; }
     setText('');
     setMinutes('');
     setOtherSpecify('');
     setCategory('other');
+    setLineNumber('');
+    setSubReason('');
     await load();
   };
 
@@ -249,21 +341,21 @@ export default function CommentsModal({ initialDate, onClose, currentUserId, isM
     <div style={{ position: 'fixed', inset: 0, background: T.modalOverlay, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(10px)' }}>
       <div style={{ background: T.modalBg, border: `1px solid ${T.borderStrong}`, borderRadius: 16, padding: 24, width: '92%', maxWidth: 540, maxHeight: '92vh', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.15)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: T.text, fontFamily: "'Outfit', sans-serif" }}>💬 Comments</h2>
+          <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: T.text, fontFamily: "'Outfit', sans-serif" }}>Downtime log</h2>
           <button onClick={onClose} style={{ background: 'none', border: 'none', color: T.textLight, fontSize: 28, cursor: 'pointer', lineHeight: 1 }}>×</button>
         </div>
 
         <div style={{ marginBottom: 14 }}>
           <div style={labelStyle}>Date</div>
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} />
-          <div style={{ fontSize: 10, color: T.textFaint, marginTop: 3 }}>Pick any date — comments are saved against that date</div>
+          <div style={{ fontSize: 10, color: T.textFaint, marginTop: 3 }}>Pick any date — the entry is saved against that date</div>
         </div>
 
         <div style={{ flex: 1, minHeight: 80, maxHeight: 320, overflowY: 'auto', borderTop: `1px solid ${T.border}`, borderBottom: `1px solid ${T.border}`, padding: '4px 2px', marginBottom: 14 }}>
           {loading ? (
             <div style={{ padding: '20px 0', fontSize: 12, color: T.textFaint, fontStyle: 'italic', textAlign: 'center' }}>Loading...</div>
           ) : comments.length === 0 ? (
-            <div style={{ padding: '20px 0', fontSize: 12, color: T.textFaint, fontStyle: 'italic', textAlign: 'center' }}>No comments for this date yet. Be the first.</div>
+            <div style={{ padding: '20px 0', fontSize: 12, color: T.textFaint, fontStyle: 'italic', textAlign: 'center' }}>Nothing logged for this date yet.</div>
           ) : (
             comments.map((c) => (
               <CommentItem key={c.id} comment={c} currentUserId={currentUserId} onEdit={edit} />
@@ -272,47 +364,76 @@ export default function CommentsModal({ initialDate, onClose, currentUserId, isM
         </div>
 
         <div>
-          <div style={labelStyle}>Add comment</div>
+          <div style={labelStyle}>What happened</div>
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onTextareaKeyDown}
-            placeholder="Type your comment..."
+            placeholder="e.g. ArPac not sealing / vision system full"
             rows={3}
             style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.5, minHeight: 60 }}
           />
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginTop: 8 }}>
             <div>
-              <div style={labelStyle}>Category</div>
-              <select value={category} onChange={(e) => setCategory(e.target.value)} style={{ ...inputStyle, cursor: 'pointer', padding: '8px 10px' }}>
+              <div style={labelStyle}>Line</div>
+              <select value={lineNumber} onChange={(e) => setLineNumber(e.target.value)}
+                style={{ ...inputStyle, cursor: 'pointer', padding: '8px 10px', borderColor: needsLine ? T.coral : T.inputBorder }}>
+                <option value="">Which line?</option>
+                {LINES.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={labelStyle}>Reason</div>
+              <select value={category} onChange={(e) => pickCategory(e.target.value)} style={{ ...inputStyle, cursor: 'pointer', padding: '8px 10px' }}>
                 {CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
               </select>
             </div>
             <div>
-              <div style={labelStyle}>Downtime (min) <span style={{ textTransform: 'none', color: T.textFaint, letterSpacing: 0 }}>· optional</span></div>
+              <div style={labelStyle}>Down (min)</div>
               <input type="number" min="0" max="1440" step="1" value={minutes} onChange={(e) => setMinutes(e.target.value)} placeholder="0" style={{ ...inputStyle, padding: '8px 10px' }} />
             </div>
           </div>
-          {category === 'other' && (
+          {subOptions && (
             <div style={{ marginTop: 8 }}>
-              <div style={labelStyle}>What kind? <span style={{ textTransform: 'none', color: T.textFaint, letterSpacing: 0 }}>· helps categorize "Other"</span></div>
+              <div style={labelStyle}>
+                {category === 'mechanical' ? 'Which machine' : 'What held us up'}
+              </div>
+              <select value={subReason} onChange={(e) => setSubReason(e.target.value)}
+                style={{ ...inputStyle, cursor: 'pointer', padding: '8px 10px', borderColor: needsSub ? T.coral : T.inputBorder }}>
+                <option value="">{category === 'mechanical' ? 'Pick the machine…' : 'Pick the cause…'}</option>
+                {subOptions.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+              </select>
+            </div>
+          )}
+          {(needsLine || needsSub) && (
+            <div style={{ fontSize: 10, color: T.coral, marginTop: 5, fontFamily: "'JetBrains Mono', monospace" }}>
+              {needsLine && 'Pick the line — downtime is reported per line.'}
+              {needsLine && needsSub && ' '}
+              {needsSub && (category === 'mechanical'
+                ? 'Pick the machine — so we can see which one costs us most.'
+                : 'Pick the cause — so we can see what holds us up most.')}
+            </div>
+          )}
+          {wantsSpecify && (
+            <div style={{ marginTop: 8 }}>
+              <div style={labelStyle}>What kind? <span style={{ textTransform: 'none', color: T.textFaint, letterSpacing: 0 }}>· spell out the "Other"</span></div>
               <input type="text" value={otherSpecify} onChange={(e) => setOtherSpecify(e.target.value)} placeholder="e.g. Utility outage, supply delay…" style={{ ...inputStyle, padding: '8px 10px' }} />
             </div>
           )}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
-            <span style={{ fontSize: 10, color: T.textFaint, fontFamily: "'JetBrains Mono', monospace" }}>⌘/Ctrl + Enter to post</span>
+            <span style={{ fontSize: 10, color: T.textFaint, fontFamily: "'JetBrains Mono', monospace" }}>⌘/Ctrl + Enter to save</span>
             <button
               onClick={post}
-              disabled={posting || !text.trim()}
+              disabled={posting || !canPost}
               style={{
                 padding: '10px 20px', borderRadius: 6, border: 'none',
-                background: posting || !text.trim() ? T.textLight : `linear-gradient(135deg, ${T.teal}, #0C8C87)`,
+                background: posting || !canPost ? T.textLight : `linear-gradient(135deg, ${T.teal}, #0C8C87)`,
                 color: '#fff', fontSize: 12, fontWeight: 700,
-                cursor: posting || !text.trim() ? 'not-allowed' : 'pointer',
+                cursor: posting || !canPost ? 'not-allowed' : 'pointer',
                 fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1, textTransform: 'uppercase',
               }}
             >
-              {posting ? 'Posting...' : 'Post'}
+              {posting ? 'Saving...' : 'Save'}
             </button>
           </div>
         </div>

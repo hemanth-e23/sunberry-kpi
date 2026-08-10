@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./lib/supabase";
 import CommentsModal, { CommentsList } from "./Comments.jsx";
+import DowntimeCard from "./Downtime.jsx";
 
 const DEFAULT_FILLER_TARGET = "05:30";
 
@@ -722,14 +723,18 @@ function ProductionDetail({ date, isToday, caps }) {
       )}
     </div>
 
-    {/* Shift 1 (6 AM–4 PM) vs Shift 2 (4 PM–2 AM), from the same scan data. */}
-    {shiftSplit && barCases > 0 && (
+    {/* Shift 1 (6 AM–4 PM) vs Shift 2 (4 PM–2 AM), from the same scan data. Stays
+        on screen with zeros on a day with no scans — a card that disappears reads
+        as a broken feature, not as an empty day. */}
+    {shiftSplit && (
       <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16, marginBottom: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
           <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: T.text, fontWeight: 700, fontFamily: "var(--mono)" }}>
             Shift Split
             <span style={{ color: T.textMid, fontWeight: 600, textTransform: "none", letterSpacing: 0 }}>
-              {untimed > 0 ? ` · ${fmt(barCases)} of ${fmt(totalCases)} cases placed` : ` · ${fmt(barCases)} cases`}
+              {barCases === 0 ? " · nothing scanned yet for this day"
+                : untimed > 0 ? ` · ${fmt(barCases)} of ${fmt(totalCases)} cases placed`
+                : ` · ${fmt(barCases)} cases`}
             </span>
           </div>
           <div style={{ fontSize: 10, color: T.textLight, fontFamily: "var(--mono)" }}>
@@ -2279,7 +2284,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
             {userRole !== "viewer" && (
               <button onClick={() => openEntry(null)} style={{ padding: "7px 12px", borderRadius: 6, border: "none", background: T.teal, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>+ ADD</button>
             )}
-            <button onClick={() => openComments(null)} title="Add or view comments" style={{ padding: "7px 12px", borderRadius: 6, border: `1px solid ${T.borderStrong}`, background: "transparent", color: T.text, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>💬 Comment</button>
+            <button onClick={() => openComments(null)} title="Log or view downtime" style={{ padding: "7px 12px", borderRadius: 6, border: `1px solid ${T.borderStrong}`, background: "transparent", color: T.text, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>Downtime</button>
           </div>
           {signOut && (
             <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: 10, marginLeft: 4, borderLeft: `1px solid ${T.border}` }}>
@@ -2372,6 +2377,9 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
 
           {selectedDate && <ProductionDetail date={selectedDate} isToday={selectedDate === todayDateStr}
             caps={{ "1": selectedEntry?.line1_capacity || 0, "2": selectedEntry?.line2_capacity || 0 }} />}
+
+          <DowntimeCard date={selectedDate} refreshTick={commentsRefreshTick} />
+
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 10, marginBottom: 18 }}>
             <StatCard title="Latest" titleDetail={latest ? formatDayShort(latest.date) : ""} value={latest ? fmt(latestTotal) : "—"}
