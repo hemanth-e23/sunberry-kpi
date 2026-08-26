@@ -1,6 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from './lib/supabase';
 
+// Rows come back in a fixed column order, so stringify is a sound equality
+// check here. Used to keep the same array reference when a background refresh
+// finds nothing new, which lets React skip the re-render entirely.
+const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
 const T = {
   bg: '#F5F0E8', card: 'rgba(255,255,255,0.6)', border: 'rgba(0,0,0,0.06)', borderStrong: 'rgba(0,0,0,0.1)',
   text: '#2C2416', textMid: 'rgba(44,36,22,0.6)', textLight: 'rgba(44,36,22,0.4)', textFaint: 'rgba(44,36,22,0.2)',
@@ -200,17 +205,22 @@ export function CommentsList({ date, currentUserId, isManager, refreshTick = 0, 
   const [comments, setComments] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
+  // `background` = the 30s tick rather than a first load or a user action.
+  // A background refresh must never show the spinner: this list renders twice
+  // on the dashboard, and blanking both to "Loading..." twice a minute is what
+  // made an idle page look like it was reloading itself.
+  const load = useCallback(async (background = false) => {
     if (!date) return;
-    setLoading(true);
-    setComments(await fetchCommentsFor(date));
+    if (!background) setLoading(true);
+    const next = await fetchCommentsFor(date);
+    setComments((prev) => (sameJson(prev, next) ? prev : next));
     setLoading(false);
   }, [date]);
 
   useEffect(() => { load(); }, [load, refreshTick]);
   useEffect(() => {
     if (!date) return;
-    const i = setInterval(load, 30000);
+    const i = setInterval(() => load(true), 30000);
     return () => clearInterval(i);
   }, [load, date]);
 
