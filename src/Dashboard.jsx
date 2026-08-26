@@ -5,7 +5,30 @@ import DowntimeCard from "./Downtime.jsx";
 
 const DEFAULT_FILLER_TARGET = "05:30";
 
+// How far back a sync (and the poll that reads it) reaches. Counted in WORKING
+// days, not calendar days — see recentWorkingDates.
+const SYNC_DAYS = 3;
+
 const trimTime = (t) => (t ? t.slice(0, 5) : null);
+
+// rowToEntry builds a fixed-shape literal, so key order is stable and stringify
+// is a sound equality check here. Used to keep state references identical when a
+// poll comes back with the same numbers.
+const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+const sameDateSet = (prev, rows) => {
+  const next = rows || [];
+  return prev.size === next.length && next.every(r => prev.has(r.entry_date));
+};
+
+// Overlay freshly-polled days onto the history already in state, newest first.
+// Only dates present in `fresh` are replaced; everything older is left alone.
+function mergeEntriesByDate(prev, fresh) {
+  if (!fresh.length) return prev;
+  const byDate = new Map(prev.map(e => [e.date, e]));
+  for (const e of fresh) byDate.set(e.date, e);
+  return [...byDate.values()].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+}
 
 function rowToEntry(r) {
   return {
@@ -162,6 +185,22 @@ function isWorkingDay(year, month, day, offDays) {
   const dow = d.getDay();
   if (dow === 0 || dow === 6) return false;
   return !(offDays && offDays.has(localDateStr(d)));
+}
+// The days a sync should refresh: today, then back over WORKING days only.
+// Counting calendar days stranded Fridays — a Monday sync spent both of its
+// look-back slots on Sat/Sun and never re-read Friday, so a warehouse
+// correction filed on Monday was never pulled in (Aug 21 2026 sat wrong for
+// four days this way). Today is always included, even on a weekend, since
+// overtime still produces. Bounded so an all-off calendar can't spin forever.
+function recentWorkingDates(offDays, count = SYNC_DAYS) {
+  const today = productionDateStr(new Date());
+  const dates = [today];
+  const d = new Date(today + "T12:00:00");
+  for (let guard = 0; dates.length < count && guard < 60; guard++) {
+    d.setDate(d.getDate() - 1);
+    if (isWorkingDay(d.getFullYear(), d.getMonth(), d.getDate(), offDays)) dates.push(localDateStr(d));
+  }
+  return dates;
 }
 function workingDaysInMonth(year, month, offDays) {
   const last = new Date(year, month + 1, 0).getDate();
@@ -2110,12 +2149,30 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   const [targets, setTargets] = useState([]);
   const [targetsOpen, setTargetsOpen] = useState(false);
   const [offDays, setOffDays] = useState(() => new Set());
+  // Read by loadData/syncNow, which are deliberately dependency-free so the 30s
+  // interval isn't torn down and restarted every time a holiday is toggled.
+  const offDaysRef = useRef(offDays);
+  useEffect(() => { offDaysRef.current = offDays; }, [offDays]);
 
   useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t); }, []);
 
-  const loadData = useCallback(async () => {
+  // Full load on mount and after every write. The background poll instead asks
+  // only for the days that can still move — sync-production rewrites today plus
+  // the previous two — and merges them into the history already in state, so the
+  // repeating query stays a fixed 3 rows however many years the table grows to.
+  const loadData = useCallback(async (recentOnly = false) => {
+    let entriesQ = supabase
+      .from("production_entries")
+      .select("*")
+      .order("entry_date", { ascending: false });
+    if (recentOnly) {
+      // Read back to the oldest day a sync can still rewrite, so the poll never
+      // sits in front of a row the sync has just corrected.
+      const win = recentWorkingDates(offDaysRef.current);
+      entriesQ = entriesQ.gte("entry_date", win[win.length - 1]);
+    }
     const [entriesRes, targetsRes, offRes] = await Promise.all([
-      supabase.from("production_entries").select("*").order("entry_date", { ascending: false }),
+      entriesQ,
       supabase.from("production_targets").select("*").order("effective_from", { ascending: true }),
       supabase.from("non_working_days").select("entry_date"),
     ]);
@@ -2123,11 +2180,15 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
     if (targetsRes.error) console.error("load targets failed", targetsRes.error);
     // Soft-fail: if the table doesn't exist yet, weekends are still auto-skipped.
     if (offRes.error) console.error("load non_working_days failed", offRes.error);
-    else setOffDays(new Set((offRes.data || []).map(r => r.entry_date)));
+    else setOffDays((prev) => (sameDateSet(prev, offRes.data) ? prev : new Set((offRes.data || []).map(r => r.entry_date))));
+    // A failed targets read used to blank every default, which made the gauges
+    // read 0% off perfectly good entries. Keep the last good set and sit this
+    // round out instead — the entries we'd derive from [] would be wrong.
+    if (targetsRes.error) { setLoading(false); return; }
     const tgts = targetsRes.data || [];
-    setTargets(tgts);
+    setTargets((prev) => (sameJson(prev, tgts) ? prev : tgts));
     if (!entriesRes.error) {
-      setData((entriesRes.data || []).map(rowToEntry).map((e) => {
+      const fetched = (entriesRes.data || []).map(rowToEntry).map((e) => {
         // Fill target/cap/filler-target from the effective default for that day,
         // but only where the row has no value (a per-day override wins).
         // Use || not ??: synced rows arrive with target/capacity = 0 (not null),
@@ -2145,23 +2206,29 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
           line1_filler_target: e.line1_filler_target ?? trimTime(d.filler_start_target),
           line2_filler_target: e.line2_filler_target ?? trimTime(d.filler_start_target),
         };
-      }));
+      });
+      // Hand back the SAME array when nothing moved. React bails out of the
+      // re-render on an unchanged reference, so a poll that finds no new
+      // production costs one small query and zero repaints — which is the whole
+      // point of the 30s tick: numbers change, the page never visibly reloads.
+      setData((prev) => {
+        const next = recentOnly ? mergeEntriesByDate(prev, fetched) : fetched;
+        return sameJson(prev, next) ? prev : next;
+      });
     }
     setLoading(false);
   }, []);
   useEffect(() => { loadData(); }, [loadData]);
-  useEffect(() => { const t = setInterval(loadData, 30000); return () => clearInterval(t); }, [loadData]);
+  useEffect(() => { const t = setInterval(() => loadData(true), 30000); return () => clearInterval(t); }, [loadData]);
 
   // Pull today's live numbers on demand. The Edge Function holds the API token
   // server-side and writes via apply_production_sync (manual values are kept).
   const syncNow = useCallback(async () => {
     setSyncing(true);
-    // Sync today plus the last 2 days, so late corrections to recent days settle
-    // (the KPI otherwise only ever refreshes today's stored total).
-    const today = productionDateStr(new Date());
-    const base = new Date(today + "T12:00:00");
-    const back = (n) => { const d = new Date(base); d.setDate(d.getDate() - n); return localDateStr(d); };
-    const dates = [today, back(1), back(2)];
+    // Today plus the last 2 WORKING days, so late corrections settle (the KPI
+    // otherwise only ever refreshes today's stored total) and a Monday sync
+    // still reaches Friday instead of stopping at the weekend.
+    const dates = recentWorkingDates(offDaysRef.current);
     const results = await Promise.all(dates.map(d =>
       supabase.functions.invoke("sync-production", { body: { date: d } })));
     setSyncing(false);
