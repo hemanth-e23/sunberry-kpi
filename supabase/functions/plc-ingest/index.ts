@@ -37,8 +37,12 @@ const CAPACITY: Record<string, number> = {
   "BT4": 5500,
 };
 
+const BATCH_TANKS = ["BT1", "BT2", "BT3", "BT4"];
+const BATCH_STAGES = ["full_at", "approved_at", "drain_start", "drain_end", "empty_at"];
+
 const MAX_BODY_BYTES = 256 * 1024;
 const MAX_ROWS = 1000;
+const MAX_BATCHES = 200;
 const MAX_AGE_MS = 35 * 24 * 3600 * 1000;   // backfill after a long outage
 const MAX_AHEAD_MS = 10 * 60 * 1000;         // plant PC clock may run a bit fast
 
@@ -107,7 +111,7 @@ Deno.serve(async (req) => {
   const text = await req.text();
   if (text.length > MAX_BODY_BYTES) return reply(413, { error: "too large" });
 
-  let body: { readings?: unknown; heartbeat?: unknown };
+  let body: { readings?: unknown; heartbeat?: unknown; batches?: unknown };
   try {
     body = JSON.parse(text);
   } catch {
@@ -139,6 +143,43 @@ Deno.serve(async (req) => {
     }
   }
 
+  // --- batches (BT tanks) ---------------------------------------------------
+  const rawBatches = Array.isArray(body.batches) ? body.batches : [];
+  if (rawBatches.length > MAX_BATCHES) return reply(413, { error: `at most ${MAX_BATCHES} batches per request` });
+
+  const batches = [];
+  for (const b of rawBatches as Record<string, unknown>[]) {
+    const tank = typeof b?.tank === "string" ? b.tank : "";
+    const started = validTs(b?.started_at);
+    const rec: Record<string, unknown> = { tank, started_at: started };
+    let ok = BATCH_TANKS.includes(tank) && !!started;
+    for (const stage of BATCH_STAGES) {
+      const v = b?.[stage];
+      if (v === null || v === undefined) { rec[stage] = null; continue; }
+      const t = validTs(v);
+      if (!t) ok = false;
+      rec[stage] = t;
+    }
+    const peak = b?.peak;
+    if (!(peak === null || peak === undefined || (ok && validGallons(tank, peak)))) ok = false;
+    rec.peak = peak ?? null;
+    const recipe = b?.recipe;
+    if (!(recipe === null || recipe === undefined || (typeof recipe === "string" && recipe.length <= 100))) ok = false;
+    rec.recipe = recipe ?? null;
+    if (!ok) return reply(400, { error: "invalid batch", batch: b });
+    rec.updated_at = new Date().toISOString();
+    batches.push(rec);
+  }
+
+  if (batches.length) {
+    const res = await rest("tank_batches?on_conflict=tank,started_at",
+      "resolution=merge-duplicates,return=minimal", batches);
+    if (!res.ok) {
+      console.error("tank_batches upsert failed", res.status, await res.text());
+      return reply(502, { error: "database write failed" });
+    }
+  }
+
   // --- heartbeat -----------------------------------------------------------
   const hb = body.heartbeat as Record<string, unknown> | undefined;
   if (hb && typeof hb === "object") {
@@ -166,5 +207,5 @@ Deno.serve(async (req) => {
     }
   }
 
-  return reply(200, { saved: rows.length, heartbeat: !!hb });
+  return reply(200, { saved: rows.length, batches: batches.length, heartbeat: !!hb });
 });

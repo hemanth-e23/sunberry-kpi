@@ -39,6 +39,30 @@ alter table public.tank_readings add constraint tank_readings_tank_check
   check (tank in ('CT1', 'CT2', 'SR tank 1', 'SR tank 2', 'SR tank 3',
                   'BT1', 'BT2', 'BT3', 'BT4'));
 
+-- added later: one row per batch-tank batch, from the PLC's own stage bits
+-- (BTn_Batching / _QC_Hold / _Approved / _Draining / _Empty), recorded by
+-- line2.py and sent by tank_sync.py. The row is updated as the batch moves on.
+create table if not exists public.tank_batches (
+  tank         text        not null check (tank in ('BT1', 'BT2', 'BT3', 'BT4')),
+  started_at   timestamptz not null,   -- started filling
+  full_at      timestamptz,            -- filling finished
+  approved_at  timestamptz,            -- QC approved
+  drain_start  timestamptz,
+  drain_end    timestamptz,
+  empty_at     timestamptz,
+  peak         real        check (peak between -500 and 10000),
+  recipe       text        check (char_length(recipe) <= 100),
+  updated_at   timestamptz not null default now(),
+  primary key (tank, started_at)
+);
+
+alter table public.tank_batches enable row level security;
+revoke all on table public.tank_batches from anon, authenticated;
+grant select on table public.tank_batches to authenticated;
+drop policy if exists "tank_batches read (signed in)" on public.tank_batches;
+create policy "tank_batches read (signed in)"
+  on public.tank_batches for select to authenticated using (true);
+
 alter table public.tank_readings enable row level security;
 alter table public.plc_heartbeat enable row level security;
 

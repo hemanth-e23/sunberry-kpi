@@ -1,17 +1,23 @@
-// Sugar & syrup room tank levels, read from the PLC on the plant floor.
+// Tank levels, read from the PLCs on the plant floor.
 //
-// Data path: cip2.py (plant PC) -> tank_sync.py -> plc-ingest Edge Function ->
+// Levels: cip2.py (plant PC) -> tank_sync.py -> plc-ingest Edge Function ->
 // tank_readings + plc_heartbeat. A reading is stored only when a tank moves
-// 100 gal or more. The hourly heartbeat carries every tank's current level and
+// 200 gal or more. The hourly heartbeat carries every tank's current level and
 // proves the plant PC is alive, so a still tank and a dead feed never look the
-// same. Each tank's History button lists its stored readings on demand.
+// same.
+//
+// Batches (BT1-BT4): line2.py records each batch from the PLC's own stage bits
+// (filling, QC hold, approved, draining, empty) -> tank_sync.py ->
+// tank_batches. BT cards show the current stage, and their History lists
+// batches instead of level steps.
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from './lib/supabase';
 
 const T = {
   card: 'rgba(255,255,255,0.6)', border: 'rgba(0,0,0,0.06)', borderStrong: 'rgba(0,0,0,0.1)',
   text: '#2C2416', textMid: 'rgba(44,36,22,0.6)', textLight: 'rgba(44,36,22,0.4)', textFaint: 'rgba(44,36,22,0.2)',
-  teal: '#0E9990', coral: '#D94A42', gold: '#C4920F',
+  teal: '#0E9990', coral: '#D94A42', gold: '#C4920F', purple: '#7054AD',
+  tealBg: 'rgba(14,153,144,0.1)', goldBg: 'rgba(196,146,15,0.1)', purpleBg: 'rgba(112,84,173,0.1)',
   coralBg: 'rgba(217,74,66,0.07)', inner: 'rgba(0,0,0,0.03)',
   modalBg: '#FAF6EF', modalOverlay: 'rgba(44,36,22,0.35)',
   mono: "'JetBrains Mono', monospace",
@@ -27,10 +33,10 @@ const GROUPS = [
     { name: 'SR tank 3', capacity: 6000 },
   ] },
   { title: 'Batch tanks', tanks: [
-    { name: 'BT1', line: 'Line 1', capacity: 5500 },
-    { name: 'BT2', line: 'Line 1', capacity: 5500 },
-    { name: 'BT3', line: 'Line 2', capacity: 5500 },
-    { name: 'BT4', line: 'Line 2', capacity: 5500 },
+    { name: 'BT1', line: 'Line 1', capacity: 5500, batches: true },
+    { name: 'BT2', line: 'Line 1', capacity: 5500, batches: true },
+    { name: 'BT3', line: 'Line 2', capacity: 5500, batches: true },
+    { name: 'BT4', line: 'Line 2', capacity: 5500, batches: true },
   ] },
 ];
 const TANKS = GROUPS.flatMap(g => g.tanks);
@@ -38,6 +44,7 @@ const TANKS = GROUPS.flatMap(g => g.tanks);
 const REFRESH_MS = 5 * 60 * 1000;
 const HEARTBEAT_STALE_MIN = 135;   // heartbeat is hourly; allow one miss plus slack
 const HISTORY_ROWS = 500;
+const BATCH_ROWS = 100;
 
 // Level sensors read slightly below zero when a tank is empty (BT1/BT2 go to
 // about -200), so anything under zero is shown as 0.
@@ -55,6 +62,48 @@ function ago(ms) {
 const hhmm = (d) => d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const dayTime = (d) =>
   `${d.toLocaleDateString([], { weekday: 'short', month: 'numeric', day: 'numeric' })} ${hhmm(d)}`;
+const dayOnly = (d) => d.toLocaleDateString([], { weekday: 'short', month: 'numeric', day: 'numeric' });
+
+function span(fromIso, toIso) {
+  if (!fromIso) return '';
+  const m = Math.round(((toIso ? Date.parse(toIso) : Date.now()) - Date.parse(fromIso)) / 60000);
+  if (m < 0) return '';
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
+// Where a batch is now, from the PLC's stage bits as line2.py recorded them.
+const STALE_BATCH_MS = 24 * 3600 * 1000;   // same limit line2.py uses
+
+function stageOf(b) {
+  if (!b) return null;
+  if (b.empty_at || b.drain_end) return { label: 'Empty', since: b.empty_at || b.drain_end, color: T.textMid, bg: T.inner };
+  // never finished and over a day old: cut off by an outage, not a real stage
+  if (Date.now() - Date.parse(b.started_at) > STALE_BATCH_MS) return { label: 'No data', since: null, color: T.textLight, bg: T.inner };
+  if (b.drain_start) return { label: 'Draining', since: b.drain_start, color: T.purple, bg: T.purpleBg };
+  if (b.approved_at) return { label: 'Approved', since: b.approved_at, color: T.teal, bg: T.tealBg };
+  if (b.full_at) return { label: 'QC hold', since: b.full_at, color: T.gold, bg: T.goldBg };
+  return { label: 'Filling', since: b.started_at, color: T.teal, bg: T.tealBg };
+}
+
+// The steps of one batch, each with its start, end and length. A step still
+// in progress runs to "now". Steps under a minute are dropped: they come from
+// line2.py starting while the tank was already mid-batch, not from real stages.
+function batchSteps(b) {
+  const steps = [
+    { label: 'Filling', from: b.started_at, to: b.full_at },
+    { label: 'QC hold', from: b.full_at, to: b.approved_at },
+    { label: 'Waiting', from: b.approved_at, to: b.drain_start },
+    { label: 'Draining', from: b.drain_start, to: b.drain_end || b.empty_at },
+  ];
+  const out = [];
+  for (const s of steps) {
+    if (!s.from) break;
+    if (s.to && Date.parse(s.to) - Date.parse(s.from) < 60000) continue;
+    out.push(s);
+  }
+  return out;
+}
 
 function TankShape({ pct, color }) {
   const W = 56, H = 96, top = 10, bodyH = H - top - 4;
@@ -82,18 +131,57 @@ function TankShape({ pct, color }) {
   );
 }
 
+function BatchBlock({ b }) {
+  const steps = batchSteps(b);
+  const done = b.empty_at || b.drain_end;
+  const cutOff = !done && Date.now() - Date.parse(b.started_at) > STALE_BATCH_MS;
+  return (
+    <div style={{ padding: '10px 0', borderBottom: `1px solid ${T.border}`, fontFamily: T.mono }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 6, fontSize: 12 }}>
+        <span style={{ color: T.text, fontWeight: 700 }}>
+          {dayOnly(new Date(b.started_at))}
+          {b.recipe && <span style={{ color: T.textMid, fontWeight: 500 }}> · {b.recipe}</span>}
+        </span>
+        <span style={{ color: T.textMid, whiteSpace: 'nowrap' }}>peak {b.peak == null ? '—' : fmtGal(b.peak)} gal</span>
+      </div>
+      {steps.map(s => (
+        <div key={s.label} style={{ display: 'flex', gap: 8, fontSize: 11, padding: '2px 0' }}>
+          <span style={{ color: T.textMid, width: 64 }}>{s.label}</span>
+          <span style={{ color: T.text, flex: 1 }}>
+            {hhmm(new Date(s.from))} → {s.to ? hhmm(new Date(s.to))
+              : cutOff ? <span style={{ color: T.textLight }}>no data after this</span>
+              : done ? <span style={{ color: T.textLight }}>?</span>
+              : <b style={{ color: T.teal }}>now</b>}
+          </span>
+          <span style={{ color: T.textMid, minWidth: 54, textAlign: 'right' }}>{s.to || (!cutOff && !done) ? span(s.from, s.to) : ''}</span>
+        </div>
+      ))}
+      {done && (
+        <div style={{ display: 'flex', gap: 8, fontSize: 11, padding: '2px 0' }}>
+          <span style={{ color: T.textMid, width: 64 }}>Empty</span>
+          <span style={{ color: T.text, flex: 1 }}>{hhmm(new Date(done))}</span>
+          <span style={{ color: T.textMid, minWidth: 54, textAlign: 'right' }}>total {span(b.started_at, done)}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function HistoryModal({ tank, onClose }) {
   const [rows, setRows] = useState(null);
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    supabase.from('tank_readings').select('ts, gallons, inches')
-      .eq('tank', tank.name).order('ts', { ascending: false }).limit(HISTORY_ROWS)
-      .then(({ data, error }) => {
-        if (error) setError(error.message);
-        else setRows(data || []);
-      });
-  }, [tank.name]);
+    const q = tank.batches
+      ? supabase.from('tank_batches').select('started_at, full_at, approved_at, drain_start, drain_end, empty_at, peak, recipe')
+          .eq('tank', tank.name).order('started_at', { ascending: false }).limit(BATCH_ROWS)
+      : supabase.from('tank_readings').select('ts, gallons, inches')
+          .eq('tank', tank.name).order('ts', { ascending: false }).limit(HISTORY_ROWS);
+    q.then(({ data, error }) => {
+      if (error) setError(error.message);
+      else setRows(data || []);
+    });
+  }, [tank.name, tank.batches]);
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
@@ -105,7 +193,7 @@ function HistoryModal({ tank, onClose }) {
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: T.modalOverlay, zIndex: 1000,
       display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
       <div onClick={e => e.stopPropagation()} role="dialog" aria-label={`${tank.name} history`}
-        style={{ background: T.modalBg, borderRadius: 12, width: 'min(380px, 100%)', maxHeight: '80vh',
+        style={{ background: T.modalBg, borderRadius: 12, width: `min(${tank.batches ? 440 : 380}px, 100%)`, maxHeight: '80vh',
           display: 'flex', flexDirection: 'column', boxShadow: '0 10px 40px rgba(0,0,0,0.2)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 16px',
           borderBottom: `1px solid ${T.border}` }}>
@@ -118,8 +206,10 @@ function HistoryModal({ tank, onClose }) {
         <div style={{ overflowY: 'auto', padding: '4px 16px 12px' }}>
           {error && <div style={{ padding: '12px 0', fontSize: 12, color: T.coral, fontFamily: T.mono }}>couldn't load: {error}</div>}
           {!error && rows === null && <div style={{ padding: '12px 0', fontSize: 12, color: T.textLight, fontFamily: T.mono }}>loading…</div>}
-          {rows && rows.length === 0 && <div style={{ padding: '12px 0', fontSize: 12, color: T.textLight, fontFamily: T.mono }}>no readings yet</div>}
-          {rows && rows.map(r => (
+          {rows && rows.length === 0 && <div style={{ padding: '12px 0', fontSize: 12, color: T.textLight, fontFamily: T.mono }}>
+            {tank.batches ? 'no batches recorded yet' : 'no readings yet'}</div>}
+          {rows && tank.batches && rows.map(b => <BatchBlock key={b.started_at} b={b} />)}
+          {rows && !tank.batches && rows.map(r => (
             <div key={r.ts} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0',
               borderBottom: `1px solid ${T.border}`, fontSize: 12, fontFamily: T.mono }}>
               <span style={{ color: T.textMid, flex: 1 }}>{dayTime(new Date(r.ts))}</span>
@@ -127,8 +217,8 @@ function HistoryModal({ tank, onClose }) {
               <span style={{ color: T.textMid, minWidth: 64, textAlign: 'right' }}>{fmtIn(r.inches)}</span>
             </div>
           ))}
-          {rows && rows.length === HISTORY_ROWS && (
-            <div style={{ paddingTop: 8, fontSize: 10, color: T.textLight, fontFamily: T.mono }}>showing the latest {HISTORY_ROWS}</div>
+          {rows && rows.length === (tank.batches ? BATCH_ROWS : HISTORY_ROWS) && (
+            <div style={{ paddingTop: 8, fontSize: 10, color: T.textLight, fontFamily: T.mono }}>showing the latest {rows.length}</div>
           )}
         </div>
       </div>
@@ -136,7 +226,7 @@ function HistoryModal({ tank, onClose }) {
   );
 }
 
-function TankCard({ tank, current, inches, onHistory }) {
+function TankCard({ tank, current, inches, stage, onHistory }) {
   const pct = current == null ? null : Math.max(0, current) / tank.capacity;
   const color = pct == null ? T.textFaint : pct < 0.15 ? T.coral : pct > 0.95 ? T.gold : T.teal;
   return (
@@ -165,6 +255,20 @@ function TankCard({ tank, current, inches, onHistory }) {
           {inches != null && (
             <div style={{ fontSize: 12, color: T.textMid, fontFamily: T.mono, marginTop: 2 }}>{fmtIn(inches)}</div>
           )}
+          {stage && (
+            <div style={{ marginTop: 6, fontSize: 11, fontFamily: T.mono, whiteSpace: 'nowrap' }}>
+              <span style={{ color: stage.color, background: stage.bg, fontWeight: 700, padding: '2px 7px', borderRadius: 4 }}>
+                {stage.label}
+              </span>
+              {stage.since && (
+                <span style={{ color: T.textLight }}>
+                  {stage.label === 'Empty'
+                    ? ` since ${Date.now() - Date.parse(stage.since) > 20 * 3600 * 1000 ? dayTime(new Date(stage.since)) : hhmm(new Date(stage.since))}`
+                    : ` for ${span(stage.since)}`}
+                </span>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -173,19 +277,24 @@ function TankCard({ tank, current, inches, onHistory }) {
 
 export default function TankLevels() {
   const [latest, setLatest] = useState({});
+  const [lastBatch, setLastBatch] = useState({});
   const [hb, setHb] = useState(null);
   const [error, setError] = useState(null);
   const [loadedAt, setLoadedAt] = useState(null);
   const [historyFor, setHistoryFor] = useState(null);
 
   const load = useCallback(async () => {
-    const [heartbeat, ...last] = await Promise.all([
+    const batchTanks = TANKS.filter(t => t.batches);
+    const [heartbeat, ...rest] = await Promise.all([
       supabase.from('plc_heartbeat').select('last_seen, last_reading, levels, inches')
         .eq('source', 'plant-pc').maybeSingle(),
       ...TANKS.map(t => supabase.from('tank_readings').select('tank, ts, gallons, inches')
         .eq('tank', t.name).order('ts', { ascending: false }).limit(1)),
+      ...batchTanks.map(t => supabase.from('tank_batches')
+        .select('tank, started_at, full_at, approved_at, drain_start, drain_end, empty_at')
+        .eq('tank', t.name).order('started_at', { ascending: false }).limit(1)),
     ]);
-    const failed = [heartbeat, ...last].find(r => r.error);
+    const failed = [heartbeat, ...rest].find(r => r.error);
     if (failed) {
       setError(failed.error.message);
       return;
@@ -193,8 +302,11 @@ export default function TankLevels() {
     setError(null);
     setHb(heartbeat.data || null);
     const l = {};
-    last.forEach(r => { if (r.data?.[0]) l[r.data[0].tank] = r.data[0]; });
+    rest.slice(0, TANKS.length).forEach(r => { if (r.data?.[0]) l[r.data[0].tank] = r.data[0]; });
     setLatest(l);
+    const b = {};
+    rest.slice(TANKS.length).forEach(r => { if (r.data?.[0]) b[r.data[0].tank] = r.data[0]; });
+    setLastBatch(b);
     setLoadedAt(Date.now());
   }, []);
 
@@ -221,6 +333,7 @@ export default function TankLevels() {
       tank,
       current: useHb ? hbLevel : row?.gallons ?? null,
       inches: useHb ? hbInches ?? null : row?.inches ?? null,
+      stage: tank.batches ? stageOf(lastBatch[tank.name]) : null,
     };
   };
 
