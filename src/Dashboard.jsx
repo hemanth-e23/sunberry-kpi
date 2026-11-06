@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./lib/supabase";
 import CommentsModal, { CommentsList } from "./Comments.jsx";
 import DowntimeCard from "./Downtime.jsx";
+import TankLevels from "./TankLevels.jsx";
 
 const DEFAULT_FILLER_TARGET = "05:30";
 
@@ -2481,6 +2482,8 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
             caps={{ "1": selectedEntry?.line1_capacity || 0, "2": selectedEntry?.line2_capacity || 0 }} />}
 
           <DowntimeCard date={selectedDate} refreshTick={commentsRefreshTick} />
+
+          <TankLevels />
 
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 10, marginBottom: 18 }}>
