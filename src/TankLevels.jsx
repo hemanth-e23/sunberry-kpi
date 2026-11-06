@@ -18,19 +18,31 @@ const T = {
 };
 
 // Gallons when full. Keep in step with tank_sync.py and the plc-ingest function.
-const TANKS = [
-  { name: 'CT1', capacity: 5500 },
-  { name: 'CT2', capacity: 5500 },
-  { name: 'SR tank 1', capacity: 6000 },
-  { name: 'SR tank 2', capacity: 8000 },
-  { name: 'SR tank 3', capacity: 6000 },
+const GROUPS = [
+  { title: 'Sugar & syrup room', tanks: [
+    { name: 'CT1', capacity: 5500 },
+    { name: 'CT2', capacity: 5500 },
+    { name: 'SR tank 1', capacity: 6000 },
+    { name: 'SR tank 2', capacity: 8000 },
+    { name: 'SR tank 3', capacity: 6000 },
+  ] },
+  { title: 'Batch tanks', tanks: [
+    { name: 'BT1', line: 'Line 1', capacity: 5500 },
+    { name: 'BT2', line: 'Line 1', capacity: 5500 },
+    { name: 'BT3', line: 'Line 2', capacity: 5500 },
+    { name: 'BT4', line: 'Line 2', capacity: 5500 },
+  ] },
 ];
+const TANKS = GROUPS.flatMap(g => g.tanks);
 
 const REFRESH_MS = 5 * 60 * 1000;
 const HEARTBEAT_STALE_MIN = 135;   // heartbeat is hourly; allow one miss plus slack
 const HISTORY_ROWS = 500;
 
-const fmtGal = (g) => (g == null ? '—' : Math.round(g).toLocaleString());
+// Level sensors read slightly below zero when a tank is empty (BT1/BT2 go to
+// about -200), so anything under zero is shown as 0.
+const fmtGal = (g) => (g == null ? '—' : Math.round(Math.max(0, g)).toLocaleString());
+const fmtIn = (i) => (i == null ? '' : `${Number(i).toFixed(1)} in`);
 
 function ago(ms) {
   const m = Math.round(ms / 60000);
@@ -75,7 +87,7 @@ function HistoryModal({ tank, onClose }) {
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    supabase.from('tank_readings').select('ts, gallons')
+    supabase.from('tank_readings').select('ts, gallons, inches')
       .eq('tank', tank.name).order('ts', { ascending: false }).limit(HISTORY_ROWS)
       .then(({ data, error }) => {
         if (error) setError(error.message);
@@ -110,8 +122,9 @@ function HistoryModal({ tank, onClose }) {
           {rows && rows.map(r => (
             <div key={r.ts} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0',
               borderBottom: `1px solid ${T.border}`, fontSize: 12, fontFamily: T.mono }}>
-              <span style={{ color: T.textMid }}>{dayTime(new Date(r.ts))}</span>
-              <span style={{ color: T.text, fontWeight: 600 }}>{fmtGal(r.gallons)} gal</span>
+              <span style={{ color: T.textMid, flex: 1 }}>{dayTime(new Date(r.ts))}</span>
+              <span style={{ color: T.text, fontWeight: 600, minWidth: 80, textAlign: 'right' }}>{fmtGal(r.gallons)} gal</span>
+              <span style={{ color: T.textMid, minWidth: 64, textAlign: 'right' }}>{fmtIn(r.inches)}</span>
             </div>
           ))}
           {rows && rows.length === HISTORY_ROWS && (
@@ -123,14 +136,15 @@ function HistoryModal({ tank, onClose }) {
   );
 }
 
-function TankCard({ tank, current, onHistory }) {
-  const pct = current == null ? null : current / tank.capacity;
+function TankCard({ tank, current, inches, onHistory }) {
+  const pct = current == null ? null : Math.max(0, current) / tank.capacity;
   const color = pct == null ? T.textFaint : pct < 0.15 ? T.coral : pct > 0.95 ? T.gold : T.teal;
   return (
     <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 10, padding: 12, minWidth: 0 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8 }}>
         <div style={{ fontSize: 11, letterSpacing: 1.5, textTransform: 'uppercase', color: T.text, fontWeight: 700, fontFamily: T.mono }}>
           {tank.name}
+          {tank.line && <span style={{ color: T.textLight, fontWeight: 500, letterSpacing: 0, textTransform: 'none' }}> · {tank.line}</span>}
         </div>
         <button type="button" onClick={onHistory}
           style={{ border: `1px solid ${T.borderStrong}`, background: 'transparent', borderRadius: 5, padding: '3px 8px',
@@ -148,6 +162,9 @@ function TankCard({ tank, current, onHistory }) {
             {pct == null ? '—' : `${Math.round(pct * 100)}%`}
             <span style={{ color: T.textLight, fontWeight: 500 }}> of {tank.capacity.toLocaleString()}</span>
           </div>
+          {inches != null && (
+            <div style={{ fontSize: 12, color: T.textMid, fontFamily: T.mono, marginTop: 2 }}>{fmtIn(inches)}</div>
+          )}
         </div>
       </div>
     </div>
@@ -163,9 +180,9 @@ export default function TankLevels() {
 
   const load = useCallback(async () => {
     const [heartbeat, ...last] = await Promise.all([
-      supabase.from('plc_heartbeat').select('last_seen, last_reading, levels')
+      supabase.from('plc_heartbeat').select('last_seen, last_reading, levels, inches')
         .eq('source', 'plant-pc').maybeSingle(),
-      ...TANKS.map(t => supabase.from('tank_readings').select('tank, ts, gallons')
+      ...TANKS.map(t => supabase.from('tank_readings').select('tank, ts, gallons, inches')
         .eq('tank', t.name).order('ts', { ascending: false }).limit(1)),
     ]);
     const failed = [heartbeat, ...last].find(r => r.error);
@@ -194,19 +211,24 @@ export default function TankLevels() {
   const hbReading = hb?.last_reading ? Date.parse(hb.last_reading) : null;
   const stale = !hbSeen || end - hbSeen > HEARTBEAT_STALE_MIN * 60000;
 
-  const cards = TANKS.map(tank => {
+  const cardFor = (tank) => {
     const row = latest[tank.name];
     // the heartbeat's level is newer than the last stored step if it came later
     const hbLevel = hb?.levels?.[tank.name];
     const useHb = hbLevel != null && hbReading && (!row || hbReading >= Date.parse(row.ts));
-    return { tank, current: useHb ? hbLevel : row?.gallons ?? null };
-  });
+    const hbInches = hb?.inches?.[tank.name];
+    return {
+      tank,
+      current: useHb ? hbLevel : row?.gallons ?? null,
+      inches: useHb ? hbInches ?? null : row?.inches ?? null,
+    };
+  };
 
   return (
     <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16, marginBottom: 18 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
         <div style={{ fontSize: 12, letterSpacing: 2, textTransform: 'uppercase', color: T.text, fontWeight: 700, fontFamily: T.mono }}>
-          Sugar &amp; syrup room
+          Tanks
           <span style={{ color: T.textMid, fontWeight: 500, letterSpacing: 0, textTransform: 'none' }}> · live from plant</span>
         </div>
         <div style={{ fontSize: 11, fontFamily: T.mono, color: stale ? T.coral : T.textMid, background: stale ? T.coralBg : 'transparent', padding: stale ? '2px 8px' : 0, borderRadius: 4 }}>
@@ -216,9 +238,18 @@ export default function TankLevels() {
             : `last check ${ago(end - hbSeen)} · ${hhmm(new Date(hbSeen))}`}
         </div>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 10 }}>
-        {cards.map(c => <TankCard key={c.tank.name} {...c} onHistory={() => setHistoryFor(c.tank)} />)}
-      </div>
+      {GROUPS.map((g, i) => (
+        <div key={g.title} style={{ marginTop: i ? 14 : 0 }}>
+          <div style={{ fontSize: 11, letterSpacing: 1.5, textTransform: 'uppercase', color: T.textMid, fontWeight: 700, fontFamily: T.mono, marginBottom: 8 }}>
+            {g.title}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 10 }}>
+            {g.tanks.map(tank => (
+              <TankCard key={tank.name} {...cardFor(tank)} onHistory={() => setHistoryFor(tank)} />
+            ))}
+          </div>
+        </div>
+      ))}
       {historyFor && <HistoryModal tank={historyFor} onClose={closeHistory} />}
     </div>
   );

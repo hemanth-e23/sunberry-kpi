@@ -31,6 +31,10 @@ const CAPACITY: Record<string, number> = {
   "SR tank 1": 6000,
   "SR tank 2": 8000,
   "SR tank 3": 6000,
+  "BT1": 5500,
+  "BT2": 5500,
+  "BT3": 5500,
+  "BT4": 5500,
 };
 
 const MAX_BODY_BYTES = 256 * 1024;
@@ -143,12 +147,18 @@ Deno.serve(async (req) => {
     for (const [tank, g] of Object.entries(sent)) {
       if (tank in CAPACITY && validGallons(tank, g)) levels[tank] = g as number;
     }
+    const inches: Record<string, number> = {};
+    const sentIn = (hb.inches && typeof hb.inches === "object") ? hb.inches as Record<string, unknown> : {};
+    for (const [tank, i] of Object.entries(sentIn)) {
+      if (tank in CAPACITY && typeof i === "number" && validInches(i)) inches[tank] = i;
+    }
     const res = await rest("plc_heartbeat?on_conflict=source",
       "resolution=merge-duplicates,return=minimal", [{
         source: "plant-pc",
         last_seen: new Date().toISOString(),   // server clock, not the plant PC's
         last_reading: validTs(hb.last_reading),
         levels,
+        inches,
       }]);
     if (!res.ok) {
       console.error("plc_heartbeat upsert failed", res.status, await res.text());

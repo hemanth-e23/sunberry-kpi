@@ -29,6 +29,16 @@ create table if not exists public.plc_heartbeat (
   levels        jsonb       not null default '{}'::jsonb
 );
 
+-- added later: current inches per tank, next to gallons
+alter table public.plc_heartbeat
+  add column if not exists inches jsonb not null default '{}'::jsonb;
+
+-- added later: batch tanks BT1-BT4
+alter table public.tank_readings drop constraint if exists tank_readings_tank_check;
+alter table public.tank_readings add constraint tank_readings_tank_check
+  check (tank in ('CT1', 'CT2', 'SR tank 1', 'SR tank 2', 'SR tank 3',
+                  'BT1', 'BT2', 'BT3', 'BT4'));
+
 alter table public.tank_readings enable row level security;
 alter table public.plc_heartbeat enable row level security;
 
