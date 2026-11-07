@@ -280,7 +280,6 @@ export default function TankLevels() {
   const [lastBatch, setLastBatch] = useState({});
   const [hb, setHb] = useState(null);
   const [error, setError] = useState(null);
-  const [loadedAt, setLoadedAt] = useState(null);
   const [historyFor, setHistoryFor] = useState(null);
 
   const load = useCallback(async () => {
@@ -288,10 +287,10 @@ export default function TankLevels() {
     const [heartbeat, ...rest] = await Promise.all([
       supabase.from('plc_heartbeat').select('last_seen, last_reading, levels, inches')
         .eq('source', 'plant-pc').maybeSingle(),
-      ...TANKS.map(t => supabase.from('tank_readings').select('tank, ts, gallons, inches')
+      ...TANKS.map(t => supabase.from('tank_readings').select('tank, ts, gallons, inches, received_at')
         .eq('tank', t.name).order('ts', { ascending: false }).limit(1)),
       ...batchTanks.map(t => supabase.from('tank_batches')
-        .select('tank, started_at, full_at, approved_at, drain_start, drain_end, empty_at')
+        .select('tank, started_at, full_at, approved_at, drain_start, drain_end, empty_at, updated_at')
         .eq('tank', t.name).order('started_at', { ascending: false }).limit(1)),
     ]);
     const failed = [heartbeat, ...rest].find(r => r.error);
@@ -307,7 +306,6 @@ export default function TankLevels() {
     const b = {};
     rest.slice(TANKS.length).forEach(r => { if (r.data?.[0]) b[r.data[0].tank] = r.data[0]; });
     setLastBatch(b);
-    setLoadedAt(Date.now());
   }, []);
 
   useEffect(() => {
@@ -316,12 +314,24 @@ export default function TankLevels() {
     return () => clearInterval(t);
   }, [load]);
 
+  // keep "updated X min ago" counting between the 5-minute reloads
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick(n => n + 1), 30000);
+    return () => clearInterval(t);
+  }, []);
+
   const closeHistory = useCallback(() => setHistoryFor(null), []);
 
-  const end = loadedAt || Date.now();
+  const nowMs = Date.now();
   const hbSeen = hb?.last_seen ? Date.parse(hb.last_seen) : null;
   const hbReading = hb?.last_reading ? Date.parse(hb.last_reading) : null;
-  const stale = !hbSeen || end - hbSeen > HEARTBEAT_STALE_MIN * 60000;
+  // The heartbeat is only hourly, but every level change and batch change is
+  // also news from the plant -- show whichever arrived most recently.
+  const lastUpdate = Math.max(0, hbSeen || 0,
+    ...Object.values(latest).map(r => Date.parse(r.received_at) || 0),
+    ...Object.values(lastBatch).map(b => Date.parse(b.updated_at) || 0)) || null;
+  const stale = !lastUpdate || nowMs - lastUpdate > HEARTBEAT_STALE_MIN * 60000;
 
   const cardFor = (tank) => {
     const row = latest[tank.name];
@@ -346,9 +356,9 @@ export default function TankLevels() {
         </div>
         <div style={{ fontSize: 11, fontFamily: T.mono, color: stale ? T.coral : T.textMid, background: stale ? T.coralBg : 'transparent', padding: stale ? '2px 8px' : 0, borderRadius: 4 }}>
           {error ? `couldn't load: ${error}`
-            : !hb ? 'waiting for the first update'
-            : stale ? `no update for ${ago(end - hbSeen).replace(' ago', '')} · last check ${hhmm(new Date(hbSeen))}`
-            : `last check ${ago(end - hbSeen)} · ${hhmm(new Date(hbSeen))}`}
+            : !lastUpdate ? 'waiting for the first update'
+            : stale ? `no update for ${ago(nowMs - lastUpdate).replace(' ago', '')} · last ${hhmm(new Date(lastUpdate))}`
+            : `updated ${ago(nowMs - lastUpdate)} · ${hhmm(new Date(lastUpdate))}`}
         </div>
       </div>
       {GROUPS.map((g, i) => (
