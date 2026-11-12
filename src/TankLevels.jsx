@@ -63,6 +63,12 @@ const hhmm = (d) => d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit
 const dayTime = (d) =>
   `${d.toLocaleDateString([], { weekday: 'short', month: 'numeric', day: 'numeric' })} ${hhmm(d)}`;
 const dayOnly = (d) => d.toLocaleDateString([], { weekday: 'short', month: 'numeric', day: 'numeric' });
+// time alone if it was today, otherwise day + time -- "3:29 PM" must never
+// mean yesterday without saying so
+const when = (iso) => {
+  const d = new Date(iso);
+  return d.toDateString() === new Date().toDateString() ? hhmm(d) : dayTime(d);
+};
 
 function span(fromIso, toIso) {
   if (!fromIso) return '';
@@ -75,9 +81,29 @@ function span(fromIso, toIso) {
 // Where a batch is now, from the PLC's stage bits as line2.py recorded them.
 const STALE_BATCH_MS = 24 * 3600 * 1000;   // same limit line2.py uses
 
+// line2.py starting (or coming back after an outage) while a tank is already
+// mid-batch records the batch at that moment and stamps every stage the tank
+// has already passed with that same time. A real fill takes 25 min or more,
+// so "full" at the same moment as "started" means: real start not recorded.
+// (If it joins while the tank is still filling, nothing marks it -- that fill
+// just looks shorter than it was.)
+const joinedMidway = (b) =>
+  !!b.full_at && Math.abs(Date.parse(b.full_at) - Date.parse(b.started_at)) < 5000;
+
 function stageOf(b) {
+  const s = rawStage(b);
+  // the stage is real, but how long it has been in it is not known
+  if (s && b && joinedMidway(b) && s.since && s.label !== 'Empty') {
+    return { ...s, since: null, note: ` seen since ${when(s.since)}` };
+  }
+  return s;
+}
+
+function rawStage(b) {
   if (!b) return null;
   if (b.empty_at || b.drain_end) return { label: 'Empty', since: b.empty_at || b.drain_end, color: T.textMid, bg: T.inner };
+  // line2.py lost sight of the tank (outage) while this batch was open
+  if (b.lost_at) return { label: 'No data', since: null, note: ` after ${when(b.lost_at)}`, color: T.textLight, bg: T.inner };
   // never finished and over a day old: cut off by an outage, not a real stage
   if (Date.now() - Date.parse(b.started_at) > STALE_BATCH_MS) return { label: 'No data', since: null, color: T.textLight, bg: T.inner };
   if (b.drain_start) return { label: 'Draining', since: b.drain_start, color: T.purple, bg: T.purpleBg };
@@ -131,10 +157,15 @@ function TankShape({ pct, color }) {
   );
 }
 
-function BatchBlock({ b }) {
+function BatchBlock({ b, stale }) {
   const steps = batchSteps(b);
   const done = b.empty_at || b.drain_end;
-  const cutOff = !done && Date.now() - Date.parse(b.started_at) > STALE_BATCH_MS;
+  const lost = !done && b.lost_at;
+  const cutOff = !done && !lost && Date.now() - Date.parse(b.started_at) > STALE_BATCH_MS;
+  // feed from the plant is stale: an unfinished step can't be said to run to "now"
+  const paused = !done && !lost && !cutOff && stale;
+  const joined = joinedMidway(b);
+  const plus = joined ? '+' : '';
   return (
     <div style={{ padding: '10px 0', borderBottom: `1px solid ${T.border}`, fontFamily: T.mono }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 6, fontSize: 12 }}>
@@ -144,36 +175,48 @@ function BatchBlock({ b }) {
         </span>
         <span style={{ color: T.textMid, whiteSpace: 'nowrap' }}>peak {b.peak == null ? '—' : fmtGal(b.peak)} gal</span>
       </div>
-      {steps.map(s => (
+      {joined && (
+        <div style={{ display: 'flex', gap: 8, fontSize: 11, padding: '2px 0' }}>
+          <span style={{ color: T.textMid, width: 64 }}>Before</span>
+          <span style={{ color: T.textLight, flex: 1 }}>not recorded · first seen {hhmm(new Date(b.started_at))}</span>
+        </div>
+      )}
+      {steps.map((s, i) => (
         <div key={s.label} style={{ display: 'flex', gap: 8, fontSize: 11, padding: '2px 0' }}>
           <span style={{ color: T.textMid, width: 64 }}>{s.label}</span>
           <span style={{ color: T.text, flex: 1 }}>
             {hhmm(new Date(s.from))} → {s.to ? hhmm(new Date(s.to))
+              : lost ? <>{hhmm(new Date(b.lost_at))} <span style={{ color: T.textLight }}>then no data</span></>
               : cutOff ? <span style={{ color: T.textLight }}>no data after this</span>
+              : paused ? <span style={{ color: T.textLight }}>no live data</span>
               : done ? <span style={{ color: T.textLight }}>?</span>
               : <b style={{ color: T.teal }}>now</b>}
           </span>
-          <span style={{ color: T.textMid, minWidth: 54, textAlign: 'right' }}>{s.to || (!cutOff && !done) ? span(s.from, s.to) : ''}</span>
+          <span style={{ color: T.textMid, minWidth: 54, textAlign: 'right' }}>
+            {s.to ? span(s.from, s.to) + (joined && i === 0 ? plus : '')
+              : lost ? span(s.from, b.lost_at) + '+'
+              : (!cutOff && !paused && !done) ? span(s.from) + (joined && i === 0 ? plus : '') : ''}
+          </span>
         </div>
       ))}
       {done && (
         <div style={{ display: 'flex', gap: 8, fontSize: 11, padding: '2px 0' }}>
           <span style={{ color: T.textMid, width: 64 }}>Empty</span>
           <span style={{ color: T.text, flex: 1 }}>{hhmm(new Date(done))}</span>
-          <span style={{ color: T.textMid, minWidth: 54, textAlign: 'right' }}>total {span(b.started_at, done)}</span>
+          <span style={{ color: T.textMid, minWidth: 54, textAlign: 'right' }}>total {span(b.started_at, done)}{plus}</span>
         </div>
       )}
     </div>
   );
 }
 
-function HistoryModal({ tank, onClose }) {
+function HistoryModal({ tank, stale, onClose }) {
   const [rows, setRows] = useState(null);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     const q = tank.batches
-      ? supabase.from('tank_batches').select('started_at, full_at, approved_at, drain_start, drain_end, empty_at, peak, recipe')
+      ? supabase.from('tank_batches').select('started_at, full_at, approved_at, drain_start, drain_end, empty_at, lost_at, peak, recipe')
           .eq('tank', tank.name).order('started_at', { ascending: false }).limit(BATCH_ROWS)
       : supabase.from('tank_readings').select('ts, gallons, inches')
           .eq('tank', tank.name).order('ts', { ascending: false }).limit(HISTORY_ROWS);
@@ -208,7 +251,7 @@ function HistoryModal({ tank, onClose }) {
           {!error && rows === null && <div style={{ padding: '12px 0', fontSize: 12, color: T.textLight, fontFamily: T.mono }}>loading…</div>}
           {rows && rows.length === 0 && <div style={{ padding: '12px 0', fontSize: 12, color: T.textLight, fontFamily: T.mono }}>
             {tank.batches ? 'no batches recorded yet' : 'no readings yet'}</div>}
-          {rows && tank.batches && rows.map(b => <BatchBlock key={b.started_at} b={b} />)}
+          {rows && tank.batches && rows.map(b => <BatchBlock key={b.started_at} b={b} stale={stale} />)}
           {rows && !tank.batches && rows.map(r => (
             <div key={r.ts} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0',
               borderBottom: `1px solid ${T.border}`, fontSize: 12, fontFamily: T.mono }}>
@@ -226,9 +269,11 @@ function HistoryModal({ tank, onClose }) {
   );
 }
 
-function TankCard({ tank, current, inches, stage, onHistory }) {
+function TankCard({ tank, current, inches, stage, product, stale, lastUpdate, onHistory }) {
   const pct = current == null ? null : Math.max(0, current) / tank.capacity;
-  const color = pct == null ? T.textFaint : pct < 0.15 ? T.coral : pct > 0.95 ? T.gold : T.teal;
+  // No live data: grey everything out and say so, rather than showing a stage
+  // that keeps counting ("Draining for 20h") while nothing is arriving.
+  const color = stale || pct == null ? T.textFaint : pct < 0.15 ? T.coral : pct > 0.95 ? T.gold : T.teal;
   return (
     <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 10, padding: 12, minWidth: 0 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8 }}>
@@ -245,17 +290,29 @@ function TankCard({ tank, current, inches, stage, onHistory }) {
       <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
         <TankShape pct={pct} color={color} />
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 24, fontWeight: 700, color: T.text, fontFamily: T.mono, lineHeight: 1.1 }}>
+          <div style={{ fontSize: 24, fontWeight: 700, color: stale ? T.textLight : T.text, fontFamily: T.mono, lineHeight: 1.1 }}>
             {fmtGal(current)}<span style={{ fontSize: 11, color: T.textMid, fontWeight: 500 }}> gal</span>
           </div>
-          <div style={{ fontSize: 12, color, fontWeight: 700, fontFamily: T.mono, marginTop: 2 }}>
+          <div style={{ fontSize: 12, color: stale ? T.textLight : color, fontWeight: 700, fontFamily: T.mono, marginTop: 2 }}>
             {pct == null ? '—' : `${Math.round(pct * 100)}%`}
             <span style={{ color: T.textLight, fontWeight: 500 }}> of {tank.capacity.toLocaleString()}</span>
           </div>
           {inches != null && (
             <div style={{ fontSize: 12, color: T.textMid, fontFamily: T.mono, marginTop: 2 }}>{fmtIn(inches)}</div>
           )}
-          {stage && (
+          {product && !stale && stage && stage.label !== 'Empty' && stage.label !== 'No data' && (
+            <div title={product} style={{ fontSize: 11, color: T.textMid, fontFamily: T.mono, marginTop: 4,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{product}</div>
+          )}
+          {stale && (
+            <div style={{ marginTop: 6, fontSize: 11, fontFamily: T.mono, whiteSpace: 'nowrap' }}>
+              <span style={{ color: T.coral, background: T.coralBg, fontWeight: 700, padding: '2px 7px', borderRadius: 4 }}>
+                No live data
+              </span>
+              {lastUpdate && <span style={{ color: T.textLight }}> · last {when(new Date(lastUpdate).toISOString())}</span>}
+            </div>
+          )}
+          {stage && !stale && (
             <div style={{ marginTop: 6, fontSize: 11, fontFamily: T.mono, whiteSpace: 'nowrap' }}>
               <span style={{ color: stage.color, background: stage.bg, fontWeight: 700, padding: '2px 7px', borderRadius: 4 }}>
                 {stage.label}
@@ -263,10 +320,11 @@ function TankCard({ tank, current, inches, stage, onHistory }) {
               {stage.since && (
                 <span style={{ color: T.textLight }}>
                   {stage.label === 'Empty'
-                    ? ` since ${Date.now() - Date.parse(stage.since) > 20 * 3600 * 1000 ? dayTime(new Date(stage.since)) : hhmm(new Date(stage.since))}`
+                    ? ` since ${when(stage.since)}`
                     : ` for ${span(stage.since)}`}
                 </span>
               )}
+              {stage.note && <span style={{ color: T.textLight }}>{stage.note}</span>}
             </div>
           )}
         </div>
@@ -290,7 +348,7 @@ export default function TankLevels() {
       ...TANKS.map(t => supabase.from('tank_readings').select('tank, ts, gallons, inches, received_at')
         .eq('tank', t.name).order('ts', { ascending: false }).limit(1)),
       ...batchTanks.map(t => supabase.from('tank_batches')
-        .select('tank, started_at, full_at, approved_at, drain_start, drain_end, empty_at, updated_at')
+        .select('tank, started_at, full_at, approved_at, drain_start, drain_end, empty_at, lost_at, recipe, updated_at')
         .eq('tank', t.name).order('started_at', { ascending: false }).limit(1)),
     ]);
     const failed = [heartbeat, ...rest].find(r => r.error);
@@ -339,11 +397,19 @@ export default function TankLevels() {
     const hbLevel = hb?.levels?.[tank.name];
     const useHb = hbLevel != null && hbReading && (!row || hbReading >= Date.parse(row.ts));
     const hbInches = hb?.inches?.[tank.name];
+    // The heartbeat lists only tanks cip2.py actually read in its last ~10 min.
+    // A fresh heartbeat without this tank means its PLC isn't answering (e.g.
+    // .42 down while the rest is fine): its level is old, not live.
+    const hbFresh = hbSeen && nowMs - hbSeen <= HEARTBEAT_STALE_MIN * 60000;
+    const tankMissing = hbFresh && hb?.levels && !(tank.name in hb.levels);
     return {
       tank,
       current: useHb ? hbLevel : row?.gallons ?? null,
       inches: useHb ? hbInches ?? null : row?.inches ?? null,
       stage: tank.batches ? stageOf(lastBatch[tank.name]) : null,
+      product: tank.batches ? lastBatch[tank.name]?.recipe || null : null,
+      stale: stale || tankMissing,
+      lastUpdate: tankMissing ? (row ? Date.parse(row.ts) : null) : lastUpdate,
     };
   };
 
@@ -373,7 +439,7 @@ export default function TankLevels() {
           </div>
         </div>
       ))}
-      {historyFor && <HistoryModal tank={historyFor} onClose={closeHistory} />}
+      {historyFor && <HistoryModal tank={historyFor} stale={stale} onClose={closeHistory} />}
     </div>
   );
 }

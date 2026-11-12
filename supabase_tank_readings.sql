@@ -63,6 +63,10 @@ drop policy if exists "tank_batches read (signed in)" on public.tank_batches;
 create policy "tank_batches read (signed in)"
   on public.tank_batches for select to authenticated using (true);
 
+-- added 2026-11-12: the batch was cut off by an outage; this is the last time
+-- line2.py saw the tank. Run this BEFORE deploying the updated plc-ingest.
+alter table public.tank_batches add column if not exists lost_at timestamptz;
+
 alter table public.tank_readings enable row level security;
 alter table public.plc_heartbeat enable row level security;
 

@@ -38,7 +38,8 @@ const CAPACITY: Record<string, number> = {
 };
 
 const BATCH_TANKS = ["BT1", "BT2", "BT3", "BT4"];
-const BATCH_STAGES = ["full_at", "approved_at", "drain_start", "drain_end", "empty_at"];
+// lost_at: line2.py stopped seeing the tank (outage) while this batch was open.
+const BATCH_STAGES = ["full_at", "approved_at", "drain_start", "drain_end", "empty_at", "lost_at"];
 
 const MAX_BODY_BYTES = 256 * 1024;
 const MAX_ROWS = 1000;
