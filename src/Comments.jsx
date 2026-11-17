@@ -72,6 +72,8 @@ export const SUB_REASONS = {
     { value: 'caser', label: 'Caser' },
     { value: 'arpac', label: 'ArPac' },
     { value: 'palletizer', label: 'Palletizer' },
+    { value: 'coder', label: 'Coder' },
+    { value: 'conveyors', label: 'Conveyors' },
     { value: 'box_maker', label: 'Box maker', lines: ['1'] },
     { value: 'recirculation_pump', label: 'Recirculation pump', lines: ['1'] },
     { value: 'bottle_jam', label: 'Bottle jam / bottle crush', lines: ['1'] },

@@ -164,6 +164,7 @@ export default function DowntimeCard({ date, refreshTick = 0 }) {
   const [rows, setRows] = useState(null);
   const [loading, setLoading] = useState(false);
   const [split, setSplit] = useState('reason'); // bar stacking: 'reason' | 'line'
+  const [lineFilter, setLineFilter] = useState('all'); // whole card: 'all' | '1' | '2'
   const [hover, setHover] = useState(null);     // hovered/focused day string
   const [openDay, setOpenDay] = useState(null); // day whose entries are shown
 
@@ -181,7 +182,11 @@ export default function DowntimeCard({ date, refreshTick = 0 }) {
 
   // An entry with no minutes is a note, not downtime — it never lands in a total,
   // but it still shows in the day drill-down.
-  const all = rows || [];
+  // Line filter: a "Both lines" stop really did cost each line, so it shows in
+  // either line's view. In "All" it is still counted once. Entries with no line
+  // set only show under "All".
+  const inLine = (e) => lineFilter === 'all' || e.line_number === lineFilter || e.line_number === 'both';
+  const all = (rows || []).filter(inLine);
   const events = all.filter(r => (r.downtime_minutes || 0) > 0);
   const lineOf = (e) => e.line_number || 'none';
 
@@ -293,10 +298,21 @@ export default function DowntimeCard({ date, refreshTick = 0 }) {
     <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 16, marginBottom: 18 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
         <div style={{ fontSize: 12, letterSpacing: 2, textTransform: 'uppercase', color: T.text, fontWeight: 700, fontFamily: T.mono }}>
-          Downtime
+          Downtime{lineFilter !== 'all' ? ` · ${LINE_META[lineFilter].label}` : ''}
           <span style={{ color: T.textMid, fontWeight: 600, textTransform: 'none', letterSpacing: 0 }}>
             {' · '}{fmtMin(day.total)} this day{day.count > 0 ? ` · ${day.count} ${day.count === 1 ? 'entry' : 'entries'}` : ''}
           </span>
+        </div>
+        <div style={{ display: 'inline-flex', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ display: 'inline-flex', border: `1px solid ${T.borderStrong}`, borderRadius: 5, overflow: 'hidden', fontFamily: T.mono, fontSize: 11 }}
+          title="Show one line only — charts, totals and top causes">
+          {[['all', 'All'], ['1', 'Line I'], ['2', 'Line II']].map(([m, lbl]) => (
+            <button key={m} type="button" onClick={() => setLineFilter(m)}
+              style={{ padding: '5px 10px', border: 'none', cursor: 'pointer', fontFamily: T.mono, fontSize: 11,
+                background: lineFilter === m ? T.text : 'transparent', color: lineFilter === m ? '#F5F0E8' : T.textMid, fontWeight: lineFilter === m ? 700 : 500 }}>
+              {lbl}
+            </button>
+          ))}
         </div>
         <div style={{ display: 'inline-flex', border: `1px solid ${T.borderStrong}`, borderRadius: 5, overflow: 'hidden', fontFamily: T.mono, fontSize: 11 }}
           title="Colour the daily bars by reason or by line">
@@ -307,6 +323,7 @@ export default function DowntimeCard({ date, refreshTick = 0 }) {
               {lbl}
             </button>
           ))}
+        </div>
         </div>
       </div>
 
