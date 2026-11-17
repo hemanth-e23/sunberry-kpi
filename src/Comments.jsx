@@ -61,6 +61,7 @@ export const LINES = [
 // it's WHAT HELD US UP. Stored as the slug, displayed from the label, so renaming
 // a label never orphans the history behind it. A category with no list here just
 // gets the free-text "What kind?" box instead.
+// `lines` limits an option to the lines that have it (no `lines` = every line).
 export const SUB_REASONS = {
   mechanical: [
     { value: 'depalletizer', label: 'Depalletizer' },
@@ -71,6 +72,10 @@ export const SUB_REASONS = {
     { value: 'caser', label: 'Caser' },
     { value: 'arpac', label: 'ArPac' },
     { value: 'palletizer', label: 'Palletizer' },
+    { value: 'box_maker', label: 'Box maker', lines: ['1'] },
+    { value: 'recirculation_pump', label: 'Recirculation pump', lines: ['1'] },
+    { value: 'bottle_jam', label: 'Bottle jam / bottle crush', lines: ['1'] },
+    { value: 'tray_maker', label: 'Tray maker', lines: ['2'] },
     { value: 'other', label: 'Other machine' },
   ],
   production: [
@@ -81,9 +86,20 @@ export const SUB_REASONS = {
     { value: 'cip_delay', label: 'CIP delay' },
     { value: 'changeover', label: 'Changeover' },
     { value: 'communication', label: 'Communication' },
+    { value: 'filler_temp', label: 'Filler temp', lines: ['1'] },
+    { value: 'low_chlorine', label: 'Low chlorine', lines: ['1'] },
+    // Not the same as mechanical "Cooler": named apart so the top-causes chart can tell them apart.
+    { value: 'cooler', label: 'Cooler (production)', lines: ['1'] },
     { value: 'other', label: 'Other' },
   ],
 };
+// The options to offer for a line. 'both' or no line yet shows them all.
+export function subReasonsFor(category, line) {
+  const list = SUB_REASONS[category];
+  if (!list) return null;
+  if (!line || line === 'both') return list;
+  return list.filter(s => !s.lines || s.lines.includes(line));
+}
 // Unknown slugs (older rows, free text) still render readably.
 export function subReasonLabel(category, value) {
   if (!value) return null;
@@ -286,7 +302,7 @@ export default function CommentsModal({ initialDate, onClose, currentUserId, isM
 
   const mins = minutes === '' ? null : Math.min(parseInt(minutes) || 0, 1440);
   const isDowntime = mins != null && mins > 0;
-  const subOptions = SUB_REASONS[category] || null;
+  const subOptions = subReasonsFor(category, lineNumber);
   // Downtime has to belong to a line and, where the reason has a picklist, to a
   // specific cause — otherwise it can't be reported per line or per machine. A
   // plain note with no minutes needs neither.
@@ -386,7 +402,13 @@ export default function CommentsModal({ initialDate, onClose, currentUserId, isM
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginTop: 8 }}>
             <div>
               <div style={labelStyle}>Line</div>
-              <select value={lineNumber} onChange={(e) => setLineNumber(e.target.value)}
+              <select value={lineNumber} onChange={(e) => {
+                const v = e.target.value;
+                setLineNumber(v);
+                // Drop a picked cause the new line doesn't have (e.g. Tray maker after switching to Line I).
+                const opts = subReasonsFor(category, v);
+                if (subReason && opts && !opts.some(s => s.value === subReason)) setSubReason('');
+              }}
                 style={{ ...inputStyle, cursor: 'pointer', padding: '8px 10px', borderColor: needsLine ? T.coral : T.inputBorder }}>
                 <option value="">Which line?</option>
                 {LINES.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
