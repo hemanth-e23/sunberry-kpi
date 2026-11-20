@@ -74,6 +74,7 @@ export const SUB_REASONS = {
     { value: 'palletizer', label: 'Palletizer' },
     { value: 'coder', label: 'Coder' },
     { value: 'conveyors', label: 'Conveyors' },
+    { value: 'sticker_machine', label: 'Sticker machine' },
     { value: 'box_maker', label: 'Box maker', lines: ['1'] },
     { value: 'recirculation_pump', label: 'Recirculation pump', lines: ['1'] },
     { value: 'bottle_jam', label: 'Bottle jam / bottle crush', lines: ['1'] },
@@ -92,6 +93,7 @@ export const SUB_REASONS = {
     { value: 'low_chlorine', label: 'Low chlorine', lines: ['1'] },
     // Not the same as mechanical "Cooler": named apart so the top-causes chart can tell them apart.
     { value: 'cooler', label: 'Cooler (production)', lines: ['1'] },
+    { value: 'sticker_machine', label: 'Sticker machine (production)' },
     { value: 'other', label: 'Other' },
   ],
 };
