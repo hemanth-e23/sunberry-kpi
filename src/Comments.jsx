@@ -78,6 +78,7 @@ export const SUB_REASONS = {
     { value: 'box_maker', label: 'Box maker', lines: ['1'] },
     { value: 'recirculation_pump', label: 'Recirculation pump', lines: ['1'] },
     { value: 'bottle_jam', label: 'Bottle jam / bottle crush', lines: ['1'] },
+    { value: 'dogbone', label: 'Dogbone', lines: ['1'] },
     { value: 'tray_maker', label: 'Tray maker', lines: ['2'] },
     { value: 'other', label: 'Other machine' },
   ],
