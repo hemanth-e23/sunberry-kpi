@@ -89,6 +89,7 @@ export const SUB_REASONS = {
     { value: 'no_bottles', label: 'No bottles to filler' },
     { value: 'cip_delay', label: 'CIP delay' },
     { value: 'changeover', label: 'Changeover' },
+    { value: 'product_change', label: 'Product change' },
     { value: 'communication', label: 'Communication' },
     { value: 'filler_temp', label: 'Filler temp', lines: ['1'] },
     { value: 'low_chlorine', label: 'Low chlorine', lines: ['1'] },
