@@ -3,3 +3,6 @@ dist
 .env.local
 .DS_Store
 *.log
+kiwi/_review/
+kiwi/_to_delete/
+supabase/.temp/

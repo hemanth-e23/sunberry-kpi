@@ -1,0 +1,6 @@
+kiwi_sync.conf
+kiwi_sync_state.json
+kiwi_sync.log
+kiwi_sync.log.old
+kiwi_sync.lock
+__pycache__/

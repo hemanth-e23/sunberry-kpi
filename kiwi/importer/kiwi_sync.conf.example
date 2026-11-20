@@ -1,0 +1,6 @@
+# Copy to kiwi_sync.conf (same folder) and fill in. Never commit kiwi_sync.conf.
+url    = https://<project-ref>.supabase.co/functions/v1/kiwi-ingest
+token  = <the KIWI_SYNC_TOKEN value>
+folder = C:\Users\<you>\<Company name>\<SharePoint site> - <Library>\<Shift report folder>
+# Only files matching this are read (Excel lock files ~$... are always skipped):
+pattern = *.xlsx

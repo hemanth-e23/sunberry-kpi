@@ -16,6 +16,25 @@ const API_BASE = Deno.env.get("KPI_API_BASE") ?? "https://inventory-api.sunberry
 const API_TOKEN = Deno.env.get("KPI_API_TOKEN")!;
 const WAREHOUSE = Deno.env.get("KPI_WAREHOUSE_ID") ?? "MP-01";
 
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
+const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
+
+// Signed-in users only. Supabase's own JWT check also accepts the public anon
+// key (it is a valid JWT and it ships in the website), so on its own it would
+// let anyone pull production data. Asking Auth for the user closes that.
+async function signedIn(req: Request): Promise<boolean> {
+  const auth = req.headers.get("Authorization") ?? "";
+  if (!/^Bearer\s+\S+/.test(auth) || !SUPABASE_URL || !ANON_KEY) return false;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: ANON_KEY, Authorization: auth } });
+    if (!r.ok) return false;
+    const u = await r.json();
+    return typeof u?.id === "string" && u.id.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -30,6 +49,8 @@ Deno.serve(async (req) => {
       status,
       headers: { ...CORS, "Content-Type": "application/json" },
     });
+
+  if (!(await signedIn(req))) return json({ error: "Please sign in again." }, 401);
 
   let payload: { date?: string; bucket_minutes?: number; warehouse_id?: string; start?: string; end?: string } = {};
   try {

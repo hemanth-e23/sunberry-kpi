@@ -3,6 +3,7 @@ import { supabase } from "./lib/supabase";
 import CommentsModal, { CommentsList } from "./Comments.jsx";
 import DowntimeCard from "./Downtime.jsx";
 import TankLevels from "./TankLevels.jsx";
+import Kiwi from "./Kiwi.jsx";
 
 const DEFAULT_FILLER_TARGET = "05:30";
 
@@ -2264,6 +2265,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
   const closeEntry = () => { setEditDate(null); setShowEntry(false); };
 
   const [commentsOpen, setCommentsOpen] = useState(false);
+  const [kiwiOpen, setKiwiOpen] = useState(false);
   const [commentsDate, setCommentsDate] = useState(null);
   const [commentsRefreshTick, setCommentsRefreshTick] = useState(0);
   const openComments = (date) => { setCommentsDate(date || null); setCommentsOpen(true); };
@@ -2387,6 +2389,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
             {userRole !== "viewer" && (
               <button onClick={() => openEntry(null)} style={{ padding: "7px 12px", borderRadius: 6, border: "none", background: T.teal, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>+ ADD</button>
             )}
+            <button onClick={() => setKiwiOpen(true)} title="Ask KIWI about production, downtime and shift reports" style={{ padding: "7px 12px", borderRadius: 6, border: "1px solid #6F8F1F", background: "rgba(111,143,31,0.08)", color: "#4F6A12", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>🥝 KIWI</button>
             <button onClick={() => openComments(null)} title="Log or view downtime" style={{ padding: "7px 12px", borderRadius: 6, border: `1px solid ${T.borderStrong}`, background: "transparent", color: T.text, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--mono)" }}>Downtime</button>
           </div>
           {signOut && (
@@ -2403,6 +2406,7 @@ export default function ProductionDashboard({ signOut, userId, userEmail, userRo
 
       {showEntry && <DataEntry onSave={saveEntry} onClose={closeEntry} existingData={data} userRole={userRole} initialDate={editDate} offDays={offDays} onSetDayOff={setDayOff} />}
       {commentsOpen && <CommentsModal onClose={closeComments} initialDate={commentsDate} currentUserId={userId} isManager={userRole === "manager"} />}
+      {kiwiOpen && <Kiwi onClose={() => setKiwiOpen(false)} />}
       {targetsOpen && <TargetsModal onClose={() => setTargetsOpen(false)} onSaved={loadData} current={effectiveTargets(productionDateStr(now), targets)} effectiveDate={productionDateStr(now)} />}
 
       {view === "dashboard" ? (
